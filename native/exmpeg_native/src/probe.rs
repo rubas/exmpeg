@@ -2,24 +2,16 @@
 //! `avformat_find_stream_info`, and return a structured report of format
 //! and stream metadata.
 //!
-//! A handful of helpers read raw C strings off `AVFormatContext`,
-//! `AVStream`, and `AVCodecParameters` fields, plus walk the
-//! `AVDictionary` metadata pointer. Those need explicit `unsafe`; the
-//! file-level `allow` is scoped to this module so the rest of the crate
-//! keeps the crate-wide `deny(unsafe_code)` default.
-
-#![allow(unsafe_code)]
-
-use std::ffi::{CStr, CString};
-use std::path::Path;
-use std::ptr;
+//! Built entirely on rsmpeg's safe wrappers — no `unsafe` in this module.
 
 use rsmpeg::avcodec::AVCodec;
 use rsmpeg::avformat::AVFormatContextInput;
+use rsmpeg::avutil::{get_pix_fmt_name, get_sample_fmt_name};
 use rsmpeg::ffi;
 use rustler::NifMap;
 
 use crate::errors::NativeError;
+use crate::input::InputSource;
 
 /// Whole-file probe report: container-level format info plus a stream
 /// entry per discovered stream.
@@ -92,33 +84,24 @@ pub(crate) struct VideoInfo {
     pub(crate) frame_rate: (i32, i32),
 }
 
-pub(crate) fn probe<P: AsRef<Path>>(path: P) -> Result<ProbeReport, NativeError> {
-    let path = path.as_ref();
-    if !path.is_file() {
-        return Err(
-            NativeError::new("invalid_request", "input path is not a regular file")
-                .with_detail("path", path.display().to_string()),
-        );
-    }
-
-    let url = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "input path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
-    })?;
-
-    let input = AVFormatContextInput::open(&url, None, &mut None)?;
+pub(crate) fn probe(source: InputSource) -> Result<ProbeReport, NativeError> {
+    let input = source.open()?;
     let streams = collect_streams(&input);
     let format = collect_format(&input);
-
     Ok(ProbeReport { format, streams })
 }
 
 fn collect_format(input: &AVFormatContextInput) -> ProbeFormat {
     let iformat = input.iformat();
-    let name = c_str_or_empty(iformat.name);
-    let long_name = c_str_opt(iformat.long_name);
+    let name = iformat.name().to_string_lossy().into_owned();
+    let long_name = iformat
+        .long_name()
+        .to_str()
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
 
-    let tags = read_dict(input.metadata);
+    let tags = read_metadata(input);
 
     let duration_s = ticks_to_seconds(input.duration, i64::from(ffi::AV_TIME_BASE));
     let start_time_s = ticks_to_seconds(input.start_time, i64::from(ffi::AV_TIME_BASE));
@@ -167,7 +150,8 @@ fn collect_streams(input: &AVFormatContextInput) -> Vec<ProbeStream> {
                 Some(AudioInfo {
                     sample_rate: codecpar.sample_rate,
                     channels: codecpar.ch_layout.nb_channels,
-                    sample_format: sample_fmt_name(codecpar.format),
+                    sample_format: get_sample_fmt_name(codecpar.format)
+                        .map(|c| c.to_string_lossy().into_owned()),
                 })
             } else {
                 None
@@ -183,7 +167,8 @@ fn collect_streams(input: &AVFormatContextInput) -> Vec<ProbeStream> {
                 Some(VideoInfo {
                     width: codecpar.width,
                     height: codecpar.height,
-                    pixel_format: pix_fmt_name(codecpar.format),
+                    pixel_format: get_pix_fmt_name(codecpar.format)
+                        .map(|c| c.to_string_lossy().into_owned()),
                     frame_rate,
                 })
             } else {
@@ -211,75 +196,28 @@ fn resolve_codec(codec_id: ffi::AVCodecID) -> (String, Option<String>) {
         || ("unknown".to_owned(), None),
         |codec| {
             let name = codec.name().to_string_lossy().into_owned();
-            let long = c_str_opt(codec.long_name);
+            let long = codec
+                .long_name()
+                .to_str()
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
             (name, long)
         },
     )
 }
 
-fn sample_fmt_name(fmt: i32) -> Option<String> {
-    // SAFETY: `av_get_sample_fmt_name` accepts any i32; an invalid enum
-    // value returns NULL, which we handle below.
-    let ptr = unsafe { ffi::av_get_sample_fmt_name(fmt) };
-    if ptr.is_null() {
-        None
-    } else {
-        // SAFETY: `ptr` is a non-NULL, NUL-terminated, static string
-        // owned by libavutil.
-        let cstr = unsafe { CStr::from_ptr(ptr) };
-        Some(cstr.to_string_lossy().into_owned())
-    }
-}
-
-fn pix_fmt_name(fmt: i32) -> Option<String> {
-    // SAFETY: `av_get_pix_fmt_name` accepts any i32; an invalid enum
-    // value returns NULL, which we handle below.
-    let ptr = unsafe { ffi::av_get_pix_fmt_name(fmt) };
-    if ptr.is_null() {
-        None
-    } else {
-        // SAFETY: `ptr` is a non-NULL, NUL-terminated, static string
-        // owned by libavutil.
-        let cstr = unsafe { CStr::from_ptr(ptr) };
-        Some(cstr.to_string_lossy().into_owned())
-    }
-}
-
-fn read_dict(dict: *mut ffi::AVDictionary) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    if dict.is_null() {
-        return out;
-    }
-    let mut entry: *mut ffi::AVDictionaryEntry = ptr::null_mut();
-    let empty = CString::new("").expect("static empty CString");
-    loop {
-        // SAFETY: `dict` is non-NULL (checked above); `empty.as_ptr()` is
-        // a valid NUL-terminated C string; `entry` is either NULL on the
-        // first pass or the previous return value from the same call.
-        entry = unsafe {
-            ffi::av_dict_get(
-                dict,
-                empty.as_ptr(),
-                entry,
-                ffi::AV_DICT_IGNORE_SUFFIX as i32,
-            )
-        };
-        if entry.is_null() {
-            break;
-        }
-        // SAFETY: `entry` is non-NULL (checked above) and both `key` and
-        // `value` are owned by the dictionary for the duration of this
-        // iteration; we copy them into `String` before continuing.
-        let key = unsafe { CStr::from_ptr((*entry).key) }
-            .to_string_lossy()
-            .into_owned();
-        // SAFETY: see above.
-        let value = unsafe { CStr::from_ptr((*entry).value) }
-            .to_string_lossy()
-            .into_owned();
-        out.push((key, value));
-    }
-    out
+fn read_metadata(input: &AVFormatContextInput) -> Vec<(String, String)> {
+    input.metadata().map_or_else(Vec::new, |dict| {
+        dict.iter()
+            .map(|entry| {
+                (
+                    entry.key().to_string_lossy().into_owned(),
+                    entry.value().to_string_lossy().into_owned(),
+                )
+            })
+            .collect()
+    })
 }
 
 #[inline]
@@ -288,33 +226,5 @@ fn ticks_to_seconds(ticks: i64, denom: i64) -> Option<f64> {
         None
     } else {
         Some(ticks as f64 / denom as f64)
-    }
-}
-
-fn c_str_or_empty(ptr: *const std::os::raw::c_char) -> String {
-    if ptr.is_null() {
-        String::new()
-    } else {
-        // SAFETY: `ptr` is non-NULL (checked above) and points at a
-        // NUL-terminated string owned by libavformat.
-        unsafe { CStr::from_ptr(ptr) }
-            .to_string_lossy()
-            .into_owned()
-    }
-}
-
-fn c_str_opt(ptr: *const std::os::raw::c_char) -> Option<String> {
-    if ptr.is_null() {
-        None
-    } else {
-        // SAFETY: see `c_str_or_empty`.
-        let s = unsafe { CStr::from_ptr(ptr) }
-            .to_string_lossy()
-            .into_owned();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
     }
 }

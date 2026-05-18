@@ -79,6 +79,23 @@ tasks:
     cmds:
       - mix hex.build
 
+  checksum:download:
+    desc: Download every prebuilt NIF artefact for the current @version from
+      its GitHub release and write `checksum-Elixir.Exmpeg.Native.exs`. Run
+      this after the release workflow has finished publishing the tarballs
+      and before `task release:publish`.
+    cmds:
+      - mix rustler_precompiled.download Exmpeg.Native --all --print
+
+  release:publish:
+    desc: Build and publish the Hex package. Requires the checksum file to be
+      up to date (run `task checksum:download` first) and a logged-in
+      `mix hex.user`.
+    cmds:
+      - mix deps.get
+      - mix hex.build
+      - mix hex.publish
+
   check:
     desc: Full local quality gate (Elixir + Rust)
     cmds:

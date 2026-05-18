@@ -68,9 +68,9 @@ fn classify_rsmpeg_error(err: &rsmpeg::error::RsmpegError) -> &'static str {
         || dbg.starts_with("Encoder")
     {
         "encode_error"
-    } else if dbg.starts_with("BufferSink") || dbg.starts_with("Bitstream") {
-        "runtime_error"
     } else {
+        // BufferSink, Bitstream, AVFrame*, TryFromIntError, Unknown all
+        // surface as runtime faults rather than user-attributable errors.
         "runtime_error"
     }
 }
