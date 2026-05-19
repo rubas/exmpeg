@@ -193,6 +193,22 @@ jobs:
           curl -fsSL "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" -o ffmpeg.tar.xz
           tar -xf ffmpeg.tar.xz
           cd "ffmpeg-$FFMPEG_VERSION"
+          # On macOS, codec headers / libs live under per-formula brew
+          # opt prefixes that clang does not search by default. FFmpeg's
+          # `--enable-lib*` checks compile a small probe program for
+          # each codec, so PKG_CONFIG_PATH alone is not enough - the
+          # compiler and linker also need the brew prefix. Build up
+          # `--extra-cflags` / `--extra-ldflags` lists from the brew
+          # prefixes of every codec formula installed in the deps step.
+          EXTRA_CFLAGS=""
+          EXTRA_LDFLAGS=""
+          if [ "$(uname)" = "Darwin" ]; then
+            for formula in lame x264 opus libvpx; do
+              p="$(brew --prefix "$formula")"
+              EXTRA_CFLAGS="${EXTRA_CFLAGS:+$EXTRA_CFLAGS }-I$p/include"
+              EXTRA_LDFLAGS="${EXTRA_LDFLAGS:+$EXTRA_LDFLAGS }-L$p/lib"
+            done
+          fi
           ./configure \
             --prefix="$PREFIX" \
             --disable-static \
@@ -206,7 +222,9 @@ jobs:
             --enable-libx264 \
             --enable-libmp3lame \
             --enable-libopus \
-            --enable-libvpx
+            --enable-libvpx \
+            ${EXTRA_CFLAGS:+--extra-cflags="$EXTRA_CFLAGS"} \
+            ${EXTRA_LDFLAGS:+--extra-ldflags="$EXTRA_LDFLAGS"}
           if [ "$(uname)" = "Darwin" ]; then
             make -j"$(sysctl -n hw.ncpu)"
           else
