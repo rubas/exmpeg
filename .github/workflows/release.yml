@@ -170,6 +170,17 @@ jobs:
           brew install pkg-config nasm yasm llvm cmake x264 lame opus libvpx
           LIBCLANG_DIR="$(brew --prefix llvm)/lib"
           echo "LIBCLANG_PATH=$LIBCLANG_DIR" >> "$GITHUB_ENV"
+          # Homebrew installs codec libs to per-formula `opt` prefixes
+          # whose `lib/pkgconfig` directories are not in pkg-config's
+          # default search path. FFmpeg's `./configure --enable-libmp3lame`
+          # (et al) calls `pkg-config --exists mp3lame opus x264 vpx`, so
+          # those prefixes have to be on PKG_CONFIG_PATH before the
+          # FFmpeg build step runs.
+          BREW_PC=""
+          for formula in lame x264 opus libvpx; do
+            BREW_PC="${BREW_PC:+$BREW_PC:}$(brew --prefix "$formula")/lib/pkgconfig"
+          done
+          echo "PKG_CONFIG_PATH=$BREW_PC" >> "$GITHUB_ENV"
 
       - name: Build FFmpeg ${{ env.FFMPEG_VERSION }} from source
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
