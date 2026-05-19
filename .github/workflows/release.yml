@@ -167,21 +167,20 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          brew install pkg-config nasm yasm llvm cmake x264 lame opus libvpx
-          LIBCLANG_DIR="$(brew --prefix llvm)/lib"
-          echo "LIBCLANG_PATH=$LIBCLANG_DIR" >> "$GITHUB_ENV"
-          # bindgen uses Homebrew's libclang here (set via LIBCLANG_PATH).
-          # Homebrew's clang does NOT default to the macOS SDK include
-          # path, so without an explicit `--sysroot` bindgen fails to
-          # resolve `<stdint.h>` / `<stdio.h>` and silently produces stub
-          # struct definitions (every type collapses to `_address` /
-          # `something_should_not_be_touched_directly`). rsmpeg then
-          # fails to compile because it expects fields like
-          # `AVFormatContext.oformat` that the stub bindings do not
-          # expose. Pass the active SDK path through to every clang
-          # invocation bindgen makes.
-          SDK_PATH="$(xcrun --show-sdk-path)"
-          echo "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=$SDK_PATH" >> "$GITHUB_ENV"
+          brew install pkg-config nasm yasm cmake x264 lame opus libvpx
+          # bindgen needs a libclang to parse the FFmpeg headers. Use
+          # Xcode's libclang rather than Homebrew's: Apple's clang
+          # natively knows where the macOS SDK lives and resolves
+          # `<stdint.h>` / `<stdio.h>` / `<sys/types.h>` without
+          # extra `-isysroot` / `-resource-dir` arguments. Homebrew's
+          # LLVM, even with `BINDGEN_EXTRA_CLANG_ARGS=--sysroot=...`,
+          # left bindgen unable to find C standard headers and
+          # silently produced stub struct definitions, which then
+          # caused rsmpeg's source to fail to compile with
+          # `no field oformat on type AVFormatContext` etc.
+          CLANG_BIN="$(xcrun --find clang)"
+          XCODE_TOOLCHAIN_LIB="$(dirname "$CLANG_BIN")/../lib"
+          echo "LIBCLANG_PATH=$XCODE_TOOLCHAIN_LIB" >> "$GITHUB_ENV"
           # Homebrew installs codec libs to per-formula `opt` prefixes
           # whose `lib/pkgconfig` directories are not in pkg-config's
           # default search path. FFmpeg's `./configure --enable-libmp3lame`
