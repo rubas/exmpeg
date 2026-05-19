@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-05-20
 
 ### Added
 
@@ -17,8 +17,6 @@
   duration of the call, plus an unconditional final tick after
   `write_trailer`. The call must be wrapped in `Task.async/1` (or
   similar) so the calling process can receive while the NIF runs.
-
-### Earlier in this branch
 
 - `Exmpeg.extract_audio/3` now writes `.wav`, `.mp3`, `.m4a` / `.aac`,
   `.opus` / `.ogg`, and `.flac`. New `:bitrate` option is forwarded to
@@ -46,7 +44,8 @@
   to a full `AVFilterGraph`. The graph drives pix_fmt conversion,
   resize, and fps in one step and unlocks the `:video_filter` option.
 - Internal: `ffi_helpers` now also exposes a safe `set_format_metadata`
-  helper. All `unsafe` in the crate remains confined to this module.
+  helper, and `reconstruct_env` moved here from `progress.rs`. All
+  `unsafe` in the crate is now confined to this single module.
 
 ### Deferred (not yet shipped)
 

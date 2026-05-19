@@ -131,18 +131,8 @@ fn send(inner: &Inner, packets_written: u64, current_pts_s: f64) {
         current_pts_s,
         total_duration_s: inner.total_duration_s,
     };
-    // SAFETY: `env_ptr` is the raw `NIF_ENV` Rustler handed us at the
-    // NIF entry point. It is valid for the full duration of the NIF
-    // call, which is the scope this emitter is alive for.
-    #[allow(unsafe_code)]
-    let env = unsafe { reconstruct_env(inner.env_ptr) };
+    let env = crate::ffi_helpers::reconstruct_env(inner.env_ptr);
     // Errors here are advisory: process gone, mailbox full, etc. Never
     // block a transcode on a slow subscriber.
     let _ = env.send(&inner.pid, (atoms::exmpeg_progress(), update).encode(env));
-}
-
-#[allow(unsafe_code)]
-unsafe fn reconstruct_env<'a>(c_env: NIF_ENV) -> Env<'a> {
-    // SAFETY: see the documented invariant on `Inner::env_ptr`.
-    unsafe { Env::new(&(), c_env) }
 }
