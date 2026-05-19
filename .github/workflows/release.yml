@@ -237,6 +237,13 @@ jobs:
         run: |
           PREFIX="$HOME/.local/ffmpeg"
           echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          # Pin the bindgen include path explicitly. Without this,
+          # rusty_ffmpeg falls back to its pre-generated bindings when
+          # pkg-config doesn't resolve to a single include dir, which
+          # then disagrees with the rsmpeg source pinned in Cargo.lock
+          # (rsmpeg expects fields like AVFormatContext.oformat that
+          # the pre-generated bindings expose differently).
+          echo "FFMPEG_INCLUDE_DIR=$PREFIX/include" >> "$GITHUB_ENV"
           if [ "$(uname)" = "Darwin" ]; then
             echo "DYLD_LIBRARY_PATH=$PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           else
