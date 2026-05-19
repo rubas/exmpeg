@@ -9,6 +9,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use rustler::{Encoder, Env, Term};
 
+mod atomic_output;
 mod concat;
 mod errors;
 mod extract_audio;
@@ -80,7 +81,9 @@ fn nif_remux(
     output: String,
     opts: remux::RemuxOpts,
 ) -> Term<'_> {
-    let result = run_with_panic_protection(|| remux::remux(env, source, &output, &opts));
+    let result = run_with_panic_protection(|| {
+        atomic_output::run(&output, |partial| remux::remux(env, source, partial, &opts))
+    });
     encode_result(env, result)
 }
 
@@ -94,7 +97,11 @@ fn nif_extract_frame(
     output: String,
     opts: extract_frame::ExtractFrameOpts,
 ) -> Term<'_> {
-    let result = run_with_panic_protection(|| extract_frame::extract_frame(source, &output, &opts));
+    let result = run_with_panic_protection(|| {
+        atomic_output::run(&output, |partial| {
+            extract_frame::extract_frame(source, partial, &opts)
+        })
+    });
     encode_result(env, result)
 }
 
@@ -107,8 +114,11 @@ fn nif_extract_audio(
     output: String,
     opts: extract_audio::ExtractAudioOpts,
 ) -> Term<'_> {
-    let result =
-        run_with_panic_protection(|| extract_audio::extract_audio(env, source, &output, &opts));
+    let result = run_with_panic_protection(|| {
+        atomic_output::run(&output, |partial| {
+            extract_audio::extract_audio(env, source, partial, &opts)
+        })
+    });
     encode_result(env, result)
 }
 
@@ -122,7 +132,11 @@ fn nif_concat(
     output: String,
     opts: concat::ConcatOpts,
 ) -> Term<'_> {
-    let result = run_with_panic_protection(|| concat::concat(env, sources, &output, &opts));
+    let result = run_with_panic_protection(|| {
+        atomic_output::run(&output, |partial| {
+            concat::concat(env, sources, partial, &opts)
+        })
+    });
     encode_result(env, result)
 }
 
@@ -138,7 +152,11 @@ fn nif_transcode(
     output: String,
     opts: transcode::TranscodeOpts,
 ) -> Term<'_> {
-    let result = run_with_panic_protection(|| transcode::transcode(env, source, &output, &opts));
+    let result = run_with_panic_protection(|| {
+        atomic_output::run(&output, |partial| {
+            transcode::transcode(env, source, partial, &opts)
+        })
+    });
     encode_result(env, result)
 }
 

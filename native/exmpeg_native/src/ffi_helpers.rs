@@ -86,3 +86,82 @@ pub(crate) fn set_format_metadata(output: &mut AVFormatContextOutput, tags: &[(S
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    fn read_codec_tag(params: &AVCodecParameters) -> u32 {
+        // SAFETY: `as_ptr()` is a valid pointer for the lifetime of the
+        // `&` borrow. `codec_tag` is a plain `u32` field, no allocation,
+        // no references; reading it is a single primitive load.
+        unsafe { (*params.as_ptr()).codec_tag }
+    }
+
+    #[test]
+    fn clear_codec_tag_zeros_the_field() {
+        let mut params = AVCodecParameters::new();
+        // SAFETY: same justification as `clear_codec_tag` itself - we
+        // need a non-zero start state to prove the helper zeroes it.
+        unsafe {
+            (*params.as_mut_ptr()).codec_tag = 0x6134_706D; // "mp4a"
+        }
+        assert_eq!(read_codec_tag(&params), 0x6134_706D);
+
+        clear_codec_tag(&mut params);
+        assert_eq!(read_codec_tag(&params), 0);
+    }
+
+    fn read_metadata_entry<'a>(output: &'a AVFormatContextOutput, key: &CStr) -> Option<&'a CStr> {
+        // SAFETY: `as_ptr()` is valid for the borrow. `av_dict_get` is
+        // safe to call against a NULL dictionary pointer (it returns
+        // NULL). The returned entry borrows from the dictionary; we
+        // immediately re-borrow as a `&CStr` tied to `output`'s
+        // lifetime.
+        unsafe {
+            let metadata = (*output.as_ptr()).metadata;
+            if metadata.is_null() {
+                return None;
+            }
+            let entry = rsmpeg::ffi::av_dict_get(metadata, key.as_ptr(), std::ptr::null(), 0);
+            if entry.is_null() {
+                return None;
+            }
+            Some(CStr::from_ptr((*entry).value))
+        }
+    }
+
+    #[test]
+    fn set_format_metadata_round_trips_tags() {
+        // Use an .mp4 path to pick a real muxer; we never write the
+        // file (no `write_header` call), so it never touches disk.
+        let url = CString::new("/tmp/exmpeg_ffi_helpers_test.mp4").unwrap();
+        let mut output = AVFormatContextOutput::create(&url).expect("muxer alloc");
+
+        let tags = vec![
+            ("title".to_owned(), "demo".to_owned()),
+            ("artist".to_owned(), "exmpeg".to_owned()),
+        ];
+        set_format_metadata(&mut output, &tags);
+
+        assert_eq!(read_metadata_entry(&output, c"title"), Some(c"demo"));
+        assert_eq!(read_metadata_entry(&output, c"artist"), Some(c"exmpeg"));
+    }
+
+    #[test]
+    fn set_format_metadata_skips_entries_with_nul_bytes() {
+        let url = CString::new("/tmp/exmpeg_ffi_helpers_nul.mp4").unwrap();
+        let mut output = AVFormatContextOutput::create(&url).expect("muxer alloc");
+
+        let tags = vec![
+            ("title".to_owned(), "ok".to_owned()),
+            ("bad\0key".to_owned(), "dropped".to_owned()),
+            ("bad_value".to_owned(), "x\0y".to_owned()),
+        ];
+        set_format_metadata(&mut output, &tags);
+
+        assert_eq!(read_metadata_entry(&output, c"title"), Some(c"ok"));
+        assert_eq!(read_metadata_entry(&output, c"bad_value"), None);
+    }
+}

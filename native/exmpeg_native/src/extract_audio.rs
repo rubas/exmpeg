@@ -28,7 +28,9 @@ pub(crate) struct ExtractAudioOpts {
     pub(crate) sample_rate: Option<i32>,
     /// Target channel count. Currently restricted to 1 (mono) or 2
     /// (stereo); other counts return `:invalid_request`. When `None`,
-    /// the source channel count is preserved (clamped to 2).
+    /// the source channel count is preserved if it is mono or stereo;
+    /// sources with more channels (5.1, 7.1, ...) return
+    /// `:invalid_request` and require an explicit `:channels` value.
     pub(crate) channels: Option<i32>,
     /// Optional target bitrate in bits per second. Ignored for
     /// lossless codecs (`pcm_s16le`, `flac`); used as a hint for
@@ -406,7 +408,23 @@ fn compute_resample_capacity(src_nb_samples: i32, src_rate: i32, dst_rate: i32) 
 }
 
 fn resolve_channels(requested: Option<i32>, src: i32) -> Result<i32, NativeError> {
-    let target = requested.unwrap_or_else(|| src.clamp(1, 2));
+    // When the caller hasn't asked for a specific layout we only carry
+    // mono / stereo sources through unchanged. A source with more
+    // channels (5.1, 7.1, ...) would otherwise be silently downmixed,
+    // which hides the layout change from downstream callers and
+    // violates the project's no-hidden-fallbacks rule. Force the
+    // caller to opt in to mono or stereo explicitly via `:channels`.
+    let target = if let Some(value) = requested {
+        value
+    } else if (1..=2).contains(&src) {
+        src
+    } else {
+        return Err(NativeError::new(
+            "invalid_request",
+            "source has more than 2 channels; pass `:channels` (1 or 2) to choose mono or stereo",
+        )
+        .with_detail("source_channels", src.to_string()));
+    };
     if !(1..=2).contains(&target) {
         return Err(
             NativeError::new("invalid_request", "channels must be 1 (mono) or 2 (stereo)")

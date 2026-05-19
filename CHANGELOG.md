@@ -92,8 +92,15 @@ Full coverage of the common `ffmpeg` / `ffprobe` CLI replacements:
 ### Safety
 
 The Rust crate is built on rsmpeg's safe wrappers with
-`#![deny(unsafe_code)]` at the crate root. The three operations
-rsmpeg does not yet expose safely (`AVCodecParameters.codec_tag`
-write, `AVAudioFifo` read/write) are isolated to a single
-`ffi_helpers.rs` module - about 15 lines of audited `unsafe` behind
-safe wrappers. Every other module is `unsafe`-free.
+`#![deny(unsafe_code)]` at the crate root. `unsafe` is confined to
+two modules, each with a `SAFETY:` comment per block:
+
+- `ffi_helpers.rs` (`AVCodecParameters.codec_tag` zero, `AVAudioFifo`
+  read/write, container metadata assignment),
+- `progress.rs` (reconstructing an `Env<'_>` from the entry-point
+  `NIF_ENV` pointer so dirty-scheduler emissions can use `Env::send`
+  instead of `OwnedEnv`).
+
+Every NIF entry point is wrapped in `run_with_panic_protection`, so
+a panic in Rust surfaces as `{:error, %{type: "nif_panic"}}` instead
+of crashing the BEAM.

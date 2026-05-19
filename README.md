@@ -53,10 +53,29 @@ info.format.duration_s
 ## Safety
 
 The Rust crate is built on rsmpeg's safe wrappers with
-`#![deny(unsafe_code)]` at the root. The three things rsmpeg does not
-yet expose safely (`AVCodecParameters.codec_tag` write, `AVAudioFifo`
-read / write) live in a single `ffi_helpers.rs` module - about 15 lines
-of `unsafe` behind safe wrappers. Every other module is `unsafe`-free.
+`#![deny(unsafe_code)]` at the root. Two modules contain `unsafe`
+blocks; every other module is `unsafe`-free.
+
+- `native/exmpeg_native/src/ffi_helpers.rs` quarantines the small
+  number of operations rsmpeg does not yet expose safely:
+  - clearing `AVCodecParameters.codec_tag` (single primitive store
+    on a unique `&mut` borrow),
+  - `AVAudioFifo::write` / `AVAudioFifo::read` against a frame's
+    `extended_data` per-channel pointer array,
+  - assigning a freshly-built `AVDictionary` into
+    `AVFormatContextOutput.metadata` (libavformat takes ownership).
+  Every `unsafe` block carries a `SAFETY:` comment naming the
+  invariant; unit tests in the same module exercise the round-trips.
+- `native/exmpeg_native/src/progress.rs` reconstructs an `Env<'_>`
+  from the raw `NIF_ENV` captured at the entry point so that
+  long-running ops can emit throttled `{:exmpeg_progress, ...}`
+  messages without an `OwnedEnv` (which panics on dirty-scheduler
+  threads). The captured pointer is valid for the lifetime of the
+  enclosing NIF call and the emitter cannot outlive that call.
+
+Every NIF entry point is wrapped in `run_with_panic_protection`, so a
+Rust panic surfaces as `{:error, %{type: "nif_panic", ...}}` instead
+of taking down the BEAM VM.
 
 ## Installation
 
