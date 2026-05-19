@@ -9,11 +9,20 @@ name = "exmpeg_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = "0.37.3"
+rustler = "0.37.4"
 # rsmpeg 0.18 binds against FFmpeg 8.x. The crate links against the system
 # ffmpeg libraries via pkg-config; FFMPEG_PKG_CONFIG_PATH can override the
 # discovery path when building against a non-default install.
-rsmpeg = { version = "0.18", default-features = false, features = ["link_system_ffmpeg"] }
+#
+# Pinned to git master because the released 0.18.0+ffmpeg.8.0 fails to
+# compile against FFmpeg 8.0.1 (an `avio_alloc_context` const-correctness
+# change tightened the second parameter of the write callback from
+# `uint8_t *` to `const uint8_t *`; master has the matching cfg gate,
+# crates.io does not).
+rsmpeg = { git = "https://github.com/larksuite/rsmpeg", branch = "master", default-features = false, features = [
+    "link_system_ffmpeg",
+    "ffmpeg8",
+] }
 
 [features]
 default = []

@@ -1,0 +1,181 @@
+name: "Setup exmpeg build env"
+description: "System packages, Task, Elixir/OTP, Rust toolchain, FFmpeg 8 (built + cached), and the mix/cargo/native caches."
+
+inputs:
+  elixir-version:
+    description: "Elixir version"
+    required: true
+  otp-version:
+    description: "OTP version"
+    required: true
+  rust-toolchain:
+    description: "Rust toolchain version"
+    required: true
+  rust-components:
+    description: "Comma-separated rustup components (e.g. 'rustfmt, clippy')"
+    required: false
+    default: ""
+  ffmpeg-version:
+    description: "FFmpeg release tag to build into ~/.local/ffmpeg"
+    required: false
+    default: "8.0.1"
+  cache-fixtures:
+    description: "Set to 'true' to cache the integration-test fixtures"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install system packages
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        # nasm/yasm     = assembler for FFmpeg's x86 codecs.
+        # libclang-dev  = bindgen needs libclang to parse the FFmpeg
+        #                 headers when the rsmpeg crate is compiled.
+        # libx264 et al = codec libraries the integration tests transcode
+        #                 against (h264 / mp3 / opus / vp9).
+        sudo apt-get install -y -qq \
+          build-essential cmake pkg-config nasm yasm \
+          libclang-dev \
+          libx264-dev libmp3lame-dev libopus-dev libvpx-dev
+
+    - name: Install Task
+      uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+
+    - name: Setup Elixir/OTP
+      uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1
+      with:
+        elixir-version: ${{ inputs.elixir-version }}
+        otp-version: ${{ inputs.otp-version }}
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+        components: ${{ inputs.rust-components }}
+
+    - name: Resolve libclang path
+      shell: bash
+      run: |
+        # bindgen looks for libclang.so via LIBCLANG_PATH. Ubuntu's
+        # libclang-dev is a meta-package whose file list contains no
+        # `.so`, so a `dpkg -L | grep .so | dirname` pipeline aborts the
+        # whole step under `set -eo pipefail`. Probe the well-known
+        # locations directly instead.
+        LIBCLANG_DIR=""
+        for candidate in /usr/lib/llvm-*/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib; do
+          if compgen -G "$candidate/libclang.so*" > /dev/null 2>&1; then
+            LIBCLANG_DIR="$candidate"
+            break
+          fi
+        done
+        if [ -z "$LIBCLANG_DIR" ]; then
+          echo "Could not locate libclang.so. Searched:" >&2
+          echo "  /usr/lib/llvm-*/lib /usr/lib/{x86_64,aarch64}-linux-gnu /usr/lib" >&2
+          exit 1
+        fi
+        echo "LIBCLANG_PATH=$LIBCLANG_DIR" >> "$GITHUB_ENV"
+
+    - name: Cache FFmpeg ${{ inputs.ffmpeg-version }} install
+      id: ffmpeg-cache
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ~/.local/ffmpeg
+        # `codecs-v2` is part of the key so the configure-flag changes
+        # below (libx264 / libmp3lame / libopus / libvpx) invalidate
+        # caches built with the earlier "no codecs" configuration.
+        key: ${{ runner.os }}-${{ runner.arch }}-ffmpeg-${{ inputs.ffmpeg-version }}-codecs-v2
+
+    - name: Build FFmpeg ${{ inputs.ffmpeg-version }} from source
+      if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        FFMPEG_VERSION: ${{ inputs.ffmpeg-version }}
+      run: |
+        set -euo pipefail
+        PREFIX="$HOME/.local/ffmpeg"
+        TMP="$(mktemp -d)"
+        cd "$TMP"
+        # Ubuntu 24.04's apt ffmpeg is too old (6.x); rsmpeg pinned to
+        # ffmpeg 8 needs the headers + shared libs from a real 8.x
+        # install. The codec flags enable the integration-test path
+        # (libx264 / libmp3lame / libopus / libvpx-vp9). `--enable-gpl
+        # --enable-version3` is required by libx264 and libvpx.
+        curl -fsSL "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" -o ffmpeg.tar.xz
+        tar -xf ffmpeg.tar.xz
+        cd "ffmpeg-$FFMPEG_VERSION"
+        ./configure \
+          --prefix="$PREFIX" \
+          --disable-static \
+          --enable-shared \
+          --disable-programs \
+          --disable-doc \
+          --disable-debug \
+          --enable-pic \
+          --enable-gpl \
+          --enable-version3 \
+          --enable-libx264 \
+          --enable-libmp3lame \
+          --enable-libopus \
+          --enable-libvpx
+        make -j"$(nproc)"
+        make install
+
+    - name: Export FFmpeg env
+      shell: bash
+      run: |
+        PREFIX="$HOME/.local/ffmpeg"
+        echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+        # `Exmpeg.TestFixtures` shells out to `ffmpeg` to synthesise
+        # integration-test inputs; install one onto $PATH separately
+        # (apt's ffmpeg is fine for this since it only runs lavfi).
+        echo "PATH=$PREFIX/bin:$PATH" >> "$GITHUB_ENV"
+
+    - name: Install ffmpeg CLI (for integration fixtures)
+      shell: bash
+      run: |
+        # `ffmpeg` CLI in $HOME/.local/ffmpeg/bin is empty because we
+        # built with --disable-programs. Add apt's ffmpeg solely as a
+        # tool for generating synthetic test clips.
+        if ! command -v ffmpeg >/dev/null 2>&1; then
+          sudo apt-get install -y -qq ffmpeg
+        fi
+
+    - name: Cache Elixir build + deps
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: |
+          _build
+          deps
+        key: ${{ runner.os }}-${{ runner.arch }}-mix-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-mix-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-
+
+    - name: Cache Cargo registry + git
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ inputs.rust-toolchain }}-${{ hashFiles('native/exmpeg_native/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-cargo-${{ inputs.rust-toolchain }}-
+
+    - name: Cache native build artifacts (Cargo target)
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: |
+          native/exmpeg_native/target
+        key: ${{ runner.os }}-${{ runner.arch }}-native-${{ inputs.rust-toolchain }}-${{ hashFiles('native/exmpeg_native/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-native-${{ inputs.rust-toolchain }}-
+
+    - name: Install Hex/Rebar + fetch deps
+      shell: bash
+      run: |
+        mix local.hex --force
+        mix local.rebar --force
+        mix deps.get
