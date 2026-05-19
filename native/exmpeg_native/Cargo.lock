@@ -323,7 +323,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "rsmpeg"
 version = "0.18.0+ffmpeg.8.0"
-source = "git+https://github.com/larksuite/rsmpeg?branch=master#b21fcfde8bb1ffdc179504e370e330385baa9819"
+source = "git+https://github.com/larksuite/rsmpeg?rev=b21fcfde8bb1ffdc179504e370e330385baa9819#b21fcfde8bb1ffdc179504e370e330385baa9819"
 dependencies = [
  "bon",
  "paste",

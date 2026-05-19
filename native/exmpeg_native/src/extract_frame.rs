@@ -35,7 +35,14 @@ pub(crate) struct ExtractFrameOpts {
 pub(crate) struct ExtractFrameStats {
     pub(crate) width: i32,
     pub(crate) height: i32,
+    /// Source-side pts of the extracted frame, in seconds. `0.0` when
+    /// the source stream carries no pts (`pts_known == false`); see
+    /// `pts_known` to distinguish that from a frame at t=0.
     pub(crate) timestamp_s: f64,
+    /// `true` when `timestamp_s` is derived from the source frame's
+    /// pts; `false` when the source stream has no pts and the field
+    /// falls back to `0.0`.
+    pub(crate) pts_known: bool,
     pub(crate) codec: String,
 }
 
@@ -152,16 +159,19 @@ pub(crate) fn extract_frame<Q: AsRef<Path>>(
     }
     output.write_trailer()?;
 
-    let observed_pts = if source_pts == ffi::AV_NOPTS_VALUE {
-        target_s
+    let (observed_pts, pts_known) = if source_pts == ffi::AV_NOPTS_VALUE {
+        (0.0, false)
     } else {
-        source_pts as f64 * f64::from(stream_time_base.num) / f64::from(stream_time_base.den)
+        let secs =
+            source_pts as f64 * f64::from(stream_time_base.num) / f64::from(stream_time_base.den);
+        (secs, true)
     };
 
     Ok(ExtractFrameStats {
         width: target_w,
         height: target_h,
         timestamp_s: observed_pts,
+        pts_known,
         codec: codec_name,
     })
 }

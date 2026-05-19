@@ -20,15 +20,29 @@ defmodule Exmpeg do
 
   ## Scope
 
-  This release covers two operations:
+  This release covers:
 
+  - `version/0` - linked FFmpeg version info.
   - `probe/1` - container + per-stream metadata (`ffprobe`).
   - `remux/3` - stream copy between containers, optionally trimmed by a
     start/duration window (`ffmpeg -i ... -c copy ...`).
+  - `extract_frame/3` - single image at a timestamp (`.jpg`, `.png`,
+    `.bmp`, `.webp`).
+  - `extract_audio/3` - audio stream to `.wav`, `.mp3`, `.m4a`/`.aac`,
+    `.opus`/`.ogg`, or `.flac`.
+  - `concat/3` - stream-copy concatenation of multiple inputs that
+    share the same stream layout.
+  - `transcode/3` - per-stream re-encode with codec, bitrate, scale,
+    fps and filter selection.
 
-  Re-encoding pipelines (transcode with codec selection, filter graphs,
-  frame extraction) are deferred to later releases; the underlying
-  `rsmpeg` crate supports them and will be exposed incrementally.
+  ## Output atomicity
+
+  Operations that write to disk (`remux/3`, `extract_frame/3`,
+  `extract_audio/3`, `concat/3`, `transcode/3`) write to a sibling
+  `<stem>.partial.<ext>` file and rename onto the final path only
+  after the muxer trailer has been written successfully. A failure
+  mid-encode removes the partial file so the destination is never
+  left half-written.
   """
 
   alias Exmpeg.{Error, MediaInfo, Native, Stream}
@@ -61,6 +75,7 @@ defmodule Exmpeg do
           width: pos_integer(),
           height: pos_integer(),
           timestamp_s: float(),
+          pts_known: boolean(),
           codec: String.t()
         }
 
@@ -230,7 +245,7 @@ defmodule Exmpeg do
 
   ## Returns
 
-      %{width: 1280, height: 720, timestamp_s: 1.501, codec: "mjpeg"}
+      %{width: 1280, height: 720, timestamp_s: 1.501, pts_known: true, codec: "mjpeg"}
   """
   @spec extract_frame(input_source(), Path.t(), [extract_frame_opt()]) ::
           {:ok, extract_frame_stats()} | {:error, Error.t()}
@@ -267,8 +282,10 @@ defmodule Exmpeg do
     codecs that only accept a fixed list of rates (libopus snaps to
     `[8000, 12000, 16000, 24000, 48000]`), the closest supported rate
     is used.
-  - `:channels` - `1` for mono or `2` for stereo (default: source,
-    clamped to stereo).
+  - `:channels` - `1` for mono or `2` for stereo. Defaults to the
+    source layout when the source is mono or stereo; sources with
+    more channels (5.1, 7.1, ...) require an explicit value and
+    otherwise return `:invalid_request`.
   - `:bitrate` - target bitrate in bps. Ignored by lossless codecs
     (`pcm_s16le`, `flac`); used as a quality hint for the lossy
     codecs.

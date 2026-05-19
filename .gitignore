@@ -23,5 +23,9 @@ test/fixtures/*
 .hex-home/
 .mix-home/
 
+# devenv runtime state (devenv.lock is checked in)
+.devenv/
+.direnv/
+
 # Claude
 .claude/

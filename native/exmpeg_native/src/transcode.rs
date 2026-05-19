@@ -466,7 +466,9 @@ fn build_video_graph(
         "video_size={src_w}x{src_h}:pix_fmt={src_fmt}:time_base={}/{}:pixel_aspect={sar_num}/{sar_den}",
         src_tb.num, src_tb.den
     ))
-    .expect("buffer args have no NUL");
+    .map_err(|_| {
+        NativeError::new("runtime_error", "buffersrc args could not be encoded as a C string")
+    })?;
 
     let spec = CString::new(filter_spec)
         .map_err(|_| NativeError::new("invalid_request", "video_filter contains a NUL byte"))?;

@@ -71,6 +71,8 @@ defmodule Exmpeg.IntegrationTest do
     assert stats.codec == "mjpeg"
     assert stats.width == 80
     assert stats.height == 60
+    assert stats.pts_known == true
+    assert stats.timestamp_s >= 1.0
     assert File.stat!(out).size > 0
     # Minimal sanity: starts with the JPEG SOI marker.
     assert <<0xFF, 0xD8, _::binary>> = File.read!(out)
