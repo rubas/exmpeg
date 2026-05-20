@@ -104,10 +104,9 @@ impl ProgressEmitter {
             return;
         };
         let now = Instant::now();
-        if let Some(last) = inner.last_emit {
-            if now.duration_since(last) < MIN_INTERVAL {
-                return;
-            }
+        match inner.last_emit {
+            Some(last) if now.duration_since(last) < MIN_INTERVAL => return,
+            _ => {}
         }
         inner.last_emit = Some(now);
         send(inner, packets_written, current_pts_s);
