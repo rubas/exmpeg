@@ -34,8 +34,10 @@ where
     // Ignoring NotFound is fine; surfacing anything else as io_error
     // keeps the failure visible rather than papering over a permission
     // problem.
-    if let Err(err) = std::fs::remove_file(&partial) {
-        if err.kind() != std::io::ErrorKind::NotFound {
+    match std::fs::remove_file(&partial) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
             return Err(
                 NativeError::new("io_error", "could not clear stale partial output")
                     .with_detail("path", partial.display().to_string())

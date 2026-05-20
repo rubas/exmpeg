@@ -60,18 +60,27 @@ impl<'a> Decoder<'a> for InputSource {
             return Ok(InputSource::Path(s));
         }
         // Tagged tuple `{:memory, <<...>>}` is an in-memory binary.
-        if let Ok(items) = get_tuple(term) {
-            if items.len() == 2 {
-                if let Ok(atom) = rustler::Atom::from_term(items[0]) {
-                    if atom == atoms::memory() {
-                        if let Ok(bin) = Binary::from_term(items[1]) {
-                            return Ok(InputSource::Memory(bin.as_slice().to_vec()));
-                        }
-                    }
-                }
-            }
+        let Ok(items) = get_tuple(term) else {
+            return Err(rustler::Error::BadArg);
+        };
+
+        if items.len() != 2 {
+            return Err(rustler::Error::BadArg);
         }
-        Err(rustler::Error::BadArg)
+
+        let Ok(atom) = rustler::Atom::from_term(items[0]) else {
+            return Err(rustler::Error::BadArg);
+        };
+
+        if atom != atoms::memory() {
+            return Err(rustler::Error::BadArg);
+        }
+
+        let Ok(bin) = Binary::from_term(items[1]) else {
+            return Err(rustler::Error::BadArg);
+        };
+
+        Ok(InputSource::Memory(bin.as_slice().to_vec()))
     }
 }
 
