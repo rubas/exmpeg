@@ -143,11 +143,12 @@ pub(crate) fn remux<Q: AsRef<Path>>(
                 packets_dropped += 1;
                 continue;
             }
-            if let Some(end) = end_s {
-                if pts >= end {
+            match end_s {
+                Some(end) if pts >= end => {
                     packets_dropped += 1;
                     break;
                 }
+                _ => {}
             }
         }
 
