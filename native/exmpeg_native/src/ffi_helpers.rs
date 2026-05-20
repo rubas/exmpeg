@@ -19,6 +19,17 @@ use rsmpeg::avformat::AVFormatContextOutput;
 use rsmpeg::avutil::{AVAudioFifo, AVDictionary, AVFrame};
 use rsmpeg::error::RsmpegError;
 
+/// Reconstruct an `Env` struct from a raw `NIF_ENV` pointer.
+///
+/// SAFETY: The raw `NIF_ENV` pointer must be a valid environment pointer handed to the NIF
+/// by Rustler, and the returned `Env` must not outlive the NIF execution context.
+pub(crate) fn reconstruct_env<'a>(c_env: rustler::wrapper::NIF_ENV) -> rustler::Env<'a> {
+    // SAFETY: We assume the caller provides a valid `c_env` pointer from the NIF context.
+    // Creating an Env is unsafe because it lets the caller create arbitrary lifetime references,
+    // which is sound as long as the returned Env does not escape the NIF call.
+    unsafe { rustler::Env::new(&(), c_env) }
+}
+
 /// Zero the `codec_tag` field of an `AVCodecParameters` so the muxer
 /// picks the correct fourCC for the output container. Required when
 /// remuxing between containers that use different tags for the same
