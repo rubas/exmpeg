@@ -1,0 +1,106 @@
+version: "3"
+
+# Cargo manifest lives next to the Rust crate, not in the repo root.
+vars:
+  CARGO_MANIFEST: native/exmpeg_native/Cargo.toml
+
+tasks:
+  setup:
+    desc: Install Elixir deps
+    cmds:
+      - mix deps.get
+
+  upgrade:
+    desc: Bump Elixir + Rust deps to latest compatible (within mix.exs / Cargo.toml constraints)
+    cmds:
+      - mix deps.update --all
+      - cargo update --manifest-path {{.CARGO_MANIFEST}}
+
+  outdated:
+    desc: Report deps that have newer releases available on Hex / crates.io
+    cmds:
+      - mix hex.outdated
+      - 'cargo outdated --manifest-path {{.CARGO_MANIFEST}} --root-deps-only || echo "(install cargo-outdated: cargo install cargo-outdated)"'
+
+  compile:
+    desc: Compile project (builds NIF; first run takes several minutes)
+    cmds:
+      - mix compile --warnings-as-errors
+
+  test:
+    desc: Run fast Elixir unit tests
+    deps: [compile]
+    cmds:
+      - mix test --color
+
+  test:integration:
+    desc: End-to-end probe / transcode tests against a generated synthetic clip
+    deps: [compile]
+    cmds:
+      - mix test --include integration --color
+
+  test:rust:
+    desc: Run Rust-side unit tests
+    cmds:
+      - cargo test --manifest-path {{.CARGO_MANIFEST}}
+
+  fmt:
+    desc: Format Elixir and Rust sources in place
+    cmds:
+      - mix format
+      - cargo fmt --manifest-path {{.CARGO_MANIFEST}}
+
+  fix:
+    desc: Auto-fix formatting and clippy lints in place
+    cmds:
+      - mix format
+      - cargo fmt --manifest-path {{.CARGO_MANIFEST}}
+      - cargo clippy --manifest-path {{.CARGO_MANIFEST}} --all-targets --fix --allow-dirty --allow-staged -- -D warnings
+
+  fmt:check:
+    desc: Verify Elixir and Rust formatting (no writes)
+    cmds:
+      - mix format --check-formatted
+      - cargo fmt --manifest-path {{.CARGO_MANIFEST}} -- --check
+
+  lint:
+    desc: Lint Elixir (credo) and Rust (clippy) with warnings treated as errors
+    cmds:
+      - mix credo --strict
+      - cargo clippy --manifest-path {{.CARGO_MANIFEST}} --all-targets -- -D warnings
+
+  docs:
+    desc: Build HexDocs into doc/
+    cmds:
+      - mix docs
+
+  hex:build:
+    desc: Build the Hex tarball locally without publishing (sanity check)
+    cmds:
+      - mix hex.build
+
+  checksum:download:
+    desc: Download every prebuilt NIF artefact for the current @version from
+      its GitHub release and write `checksum-Elixir.Exmpeg.Native.exs`. Run
+      this after the release workflow has finished publishing the tarballs
+      and before `task release:publish`.
+    cmds:
+      - mix rustler_precompiled.download Exmpeg.Native --all --print
+
+  release:publish:
+    desc: Build and publish the Hex package. Requires the checksum file to be
+      up to date (run `task checksum:download` first) and a logged-in
+      `mix hex.user`.
+    cmds:
+      - mix deps.get
+      - mix hex.build
+      - mix hex.publish
+
+  check:
+    desc: Full local quality gate (Elixir + Rust)
+    cmds:
+      - task: fmt:check
+      - task: compile
+      - task: lint
+      - task: test
+      - task: test:rust
