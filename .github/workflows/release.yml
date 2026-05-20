@@ -1,0 +1,450 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g., v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  # Prefer the workflow_dispatch tag over the branch name: `ref_name` is
+  # always set for manual dispatches (it carries the branch the
+  # workflow was launched from), so the previous `github.ref_name ||
+  # inputs.tag` ordering collapsed two distinct manual tag-builds from
+  # `main` into the same concurrency group.
+  group: release-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.94.1"
+  FFMPEG_VERSION: "8.0.1"
+
+jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    outputs:
+      should_release: ${{ steps.resolve.outputs.should_release }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag_exists: ${{ steps.resolve.outputs.tag_exists }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      nif_version: ${{ steps.resolve.outputs.nif_version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release target
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+            VERSION="${TAG#v}"
+            SHOULD_RELEASE=true
+          else
+            VERSION="$(sed -n 's/^  @version "\([^"]*\)"$/\1/p' mix.exs | head -n1)"
+            # A root commit (e.g. after a squashed history) has no parent,
+            # so `git show HEAD^` would fail under `set -e`. Treat a missing
+            # parent as "no previous version" so the release still fires.
+            if git rev-parse -q --verify "HEAD^" >/dev/null 2>&1; then
+              PREVIOUS_VERSION="$(git show HEAD^:mix.exs 2>/dev/null | sed -n 's/^  @version "\([^"]*\)"$/\1/p' | head -n1)"
+            else
+              PREVIOUS_VERSION=""
+            fi
+
+            if [ -z "$VERSION" ]; then
+              echo "Failed to read current mix.exs version" >&2
+              exit 1
+            fi
+
+            TAG="v$VERSION"
+
+            if [ "$VERSION" = "$PREVIOUS_VERSION" ]; then
+              SHOULD_RELEASE=false
+            else
+              SHOULD_RELEASE=true
+            fi
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            TAG_EXISTS=true
+          else
+            TAG_EXISTS=false
+          fi
+
+          # On a plain push, never re-release a version that is already
+          # tagged. This is what stops every subsequent push to main from
+          # rebuilding and re-uploading the same release (the version
+          # comparison above can't catch it on a squashed root commit,
+          # which has no parent to diff against). A deliberate rebuild
+          # still works via the workflow_dispatch path.
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$TAG_EXISTS" = "true" ]; then
+            SHOULD_RELEASE=false
+          fi
+
+          NIF_VERSION="$(sed -n 's/^[[:space:]]*nif_versions:[[:space:]]*\["\([^"]*\)"\].*$/\1/p' \
+            lib/exmpeg/native.ex | head -n1)"
+          if [ -z "$NIF_VERSION" ]; then
+            echo "Failed to parse nif_versions from lib/exmpeg/native.ex" >&2
+            exit 1
+          fi
+
+          echo "should_release=$SHOULD_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=$TAG_EXISTS" >> "$GITHUB_OUTPUT"
+          echo "sha=$TRIGGER_SHA" >> "$GITHUB_OUTPUT"
+          echo "nif_version=$NIF_VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
+    name: ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64 Linux
+          - id: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            lib_ext: so
+            src_ext: so
+
+          # aarch64 Linux
+          - id: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            lib_ext: so
+            src_ext: so
+
+          # Apple Silicon
+          # cargo emits .dylib on macOS; rustler_precompiled requests .so
+          # for darwin targets (matches Tokenizers / Explorer convention).
+          - id: aarch64-apple-darwin
+            target: aarch64-apple-darwin
+            runner: macos-15
+            lib_ext: so
+            src_ext: dylib
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.detect.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache FFmpeg ${{ env.FFMPEG_VERSION }} install
+        id: ffmpeg-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.local/ffmpeg
+          # `lgpl-webp-v1` invalidates earlier caches that were built with
+          # `--enable-gpl --enable-libx264` or without libwebp. The bundled
+          # FFmpeg is LGPL-only (libmp3lame/libopus/libvpx/libwebp) so the
+          # precompiled tarballs can ship under the package's MIT license.
+          key: release-${{ runner.os }}-${{ runner.arch }}-ffmpeg-${{ env.FFMPEG_VERSION }}-lgpl-webp-v1
+
+      - name: Install build deps (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential cmake pkg-config nasm yasm libclang-dev curl xz-utils \
+            libmp3lame-dev libopus-dev libvpx-dev libwebp-dev \
+            patchelf
+          LIBCLANG_DIR=""
+          for candidate in /usr/lib/llvm-*/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib; do
+            if compgen -G "$candidate/libclang.so*" > /dev/null 2>&1; then
+              LIBCLANG_DIR="$candidate"
+              break
+            fi
+          done
+          if [ -z "$LIBCLANG_DIR" ]; then
+            echo "Could not locate libclang.so" >&2
+            exit 1
+          fi
+          echo "LIBCLANG_PATH=$LIBCLANG_DIR" >> "$GITHUB_ENV"
+
+      - name: Install build deps (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install pkg-config nasm yasm cmake lame opus libvpx webp
+          # bindgen needs a libclang to parse the FFmpeg headers. Use
+          # Xcode's libclang rather than Homebrew's: Apple's clang
+          # natively knows where the macOS SDK lives and resolves
+          # `<stdint.h>` / `<stdio.h>` / `<sys/types.h>` without
+          # extra `-isysroot` / `-resource-dir` arguments. Homebrew's
+          # LLVM, even with `BINDGEN_EXTRA_CLANG_ARGS=--sysroot=...`,
+          # left bindgen unable to find C standard headers and
+          # silently produced stub struct definitions, which then
+          # caused rsmpeg's source to fail to compile with
+          # `no field oformat on type AVFormatContext` etc.
+          CLANG_BIN="$(xcrun --find clang)"
+          XCODE_TOOLCHAIN_LIB="$(dirname "$CLANG_BIN")/../lib"
+          echo "LIBCLANG_PATH=$XCODE_TOOLCHAIN_LIB" >> "$GITHUB_ENV"
+          # Homebrew installs codec libs to per-formula `opt` prefixes
+          # whose `lib/pkgconfig` directories are not in pkg-config's
+          # default search path. FFmpeg's `./configure --enable-libmp3lame`
+          # (et al) calls `pkg-config --exists mp3lame opus vpx libwebp`, so
+          # those prefixes have to be on PKG_CONFIG_PATH before the
+          # FFmpeg build step runs.
+          BREW_PC=""
+          for formula in lame opus libvpx webp; do
+            BREW_PC="${BREW_PC:+$BREW_PC:}$(brew --prefix "$formula")/lib/pkgconfig"
+          done
+          echo "PKG_CONFIG_PATH=$BREW_PC" >> "$GITHUB_ENV"
+
+      - name: Build FFmpeg ${{ env.FFMPEG_VERSION }} from source
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREFIX="$HOME/.local/ffmpeg"
+          TMP="$(mktemp -d)"
+          cd "$TMP"
+          curl -fsSL "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" -o ffmpeg.tar.xz
+          tar -xf ffmpeg.tar.xz
+          cd "ffmpeg-$FFMPEG_VERSION"
+          # On macOS, codec headers / libs live under per-formula brew
+          # opt prefixes that clang does not search by default. FFmpeg's
+          # `--enable-lib*` checks compile a small probe program for
+          # each codec, so PKG_CONFIG_PATH alone is not enough - the
+          # compiler and linker also need the brew prefix. Build up
+          # `--extra-cflags` / `--extra-ldflags` lists from the brew
+          # prefixes of every codec formula installed in the deps step.
+          EXTRA_CFLAGS=""
+          EXTRA_LDFLAGS=""
+          if [ "$(uname)" = "Darwin" ]; then
+            for formula in lame opus libvpx webp; do
+              p="$(brew --prefix "$formula")"
+              EXTRA_CFLAGS="${EXTRA_CFLAGS:+$EXTRA_CFLAGS }-I$p/include"
+              EXTRA_LDFLAGS="${EXTRA_LDFLAGS:+$EXTRA_LDFLAGS }-L$p/lib"
+            done
+          fi
+          # No `--enable-gpl` / `--enable-libx264`: the resulting FFmpeg
+          # libraries are bundled into the distributed precompiled
+          # tarballs, so they must stay LGPL to ship under the package's
+          # MIT license. libmp3lame is LGPL; libopus, libvpx, and libwebp
+          # are BSD - all dynamic-link cleanly from MIT/LGPL. H.264/H.265
+          # software encoding (libx264/libx265, GPL) is therefore not in
+          # the precompiled binaries; consumers who need it build from
+          # source (EXMPEG_BUILD=1) against their own GPL FFmpeg.
+          ./configure \
+            --prefix="$PREFIX" \
+            --disable-static \
+            --enable-shared \
+            --disable-programs \
+            --disable-doc \
+            --disable-debug \
+            --enable-pic \
+            --enable-libmp3lame \
+            --enable-libopus \
+            --enable-libvpx \
+            --enable-libwebp \
+            ${EXTRA_CFLAGS:+--extra-cflags="$EXTRA_CFLAGS"} \
+            ${EXTRA_LDFLAGS:+--extra-ldflags="$EXTRA_LDFLAGS"}
+          if [ "$(uname)" = "Darwin" ]; then
+            make -j"$(sysctl -n hw.ncpu)"
+          else
+            make -j"$(nproc)"
+          fi
+          make install
+
+      - name: Export FFmpeg env
+        shell: bash
+        run: |
+          PREFIX="$HOME/.local/ffmpeg"
+          echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          # Pin the bindgen include path explicitly. Without this,
+          # rusty_ffmpeg falls back to its pre-generated bindings when
+          # pkg-config doesn't resolve to a single include dir, which
+          # then disagrees with the rsmpeg source pinned in Cargo.lock
+          # (rsmpeg expects fields like AVFormatContext.oformat that
+          # the pre-generated bindings expose differently).
+          echo "FFMPEG_INCLUDE_DIR=$PREFIX/include" >> "$GITHUB_ENV"
+          if [ "$(uname)" = "Darwin" ]; then
+            echo "DYLD_LIBRARY_PATH=$PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          else
+            echo "LD_LIBRARY_PATH=$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cargo cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            native/exmpeg_native/target
+          key: release-${{ matrix.id }}-${{ hashFiles('native/exmpeg_native/Cargo.lock') }}
+          restore-keys: release-${{ matrix.id }}-
+
+      - name: Build NIF
+        working-directory: native/exmpeg_native
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --release --target "$TARGET"
+
+      - name: Create tarball with bundled FFmpeg libs
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          NIF_VERSION: ${{ needs.detect.outputs.nif_version }}
+          SRC_EXT: ${{ matrix.src_ext }}
+          LIB_EXT: ${{ matrix.lib_ext }}
+        run: |
+          set -euo pipefail
+          SRC_DIR="native/exmpeg_native/target/${TARGET}/release"
+          SRC_NAME="libexmpeg_native.${SRC_EXT}"
+          LIB_NAME="libexmpeg_native-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.${LIB_EXT}"
+          FFMPEG_PREFIX="$HOME/.local/ffmpeg"
+          STAGE="$(mktemp -d)"
+
+          # Always start fresh: copy the freshly-built NIF, then bundle
+          # the six FFmpeg shared libraries it dlopens (avformat,
+          # avcodec, avutil, avfilter, swscale, swresample). Codec libs
+          # the consumer's distro provides (libmp3lame, libopus, libvpx,
+          # libwebp) are NOT bundled - they're listed as a runtime
+          # requirement in README.md.
+          cp "${SRC_DIR}/${SRC_NAME}" "${STAGE}/${LIB_NAME}"
+          for lib in libavformat libavcodec libavutil libavfilter libswscale libswresample; do
+            # Each FFmpeg shared lib ships as `libname.so.MAJOR.MINOR.PATCH`
+            # plus two SONAME symlinks (`libname.so` and
+            # `libname.so.MAJOR`). dlopen resolves the SONAME, so we
+            # copy the real file and re-create the SONAME symlink that
+            # libavcodec et al embed in their NEEDED entries.
+            if [ "$(uname)" = "Darwin" ]; then
+              real_path=$(find "${FFMPEG_PREFIX}/lib" -maxdepth 1 -name "${lib}.*.dylib" -not -type l | head -n1)
+            else
+              real_path=$(find "${FFMPEG_PREFIX}/lib" -maxdepth 1 -name "${lib}.so.*" -not -type l | head -n1)
+            fi
+            if [ -z "$real_path" ]; then
+              echo "Missing $lib under ${FFMPEG_PREFIX}/lib" >&2
+              ls -la "${FFMPEG_PREFIX}/lib" >&2 || true
+              exit 1
+            fi
+            cp "$real_path" "${STAGE}/"
+            # Re-create the major-version symlink the SONAME points at.
+            if [ "$(uname)" = "Darwin" ]; then
+              soname=$(basename "$(find "${FFMPEG_PREFIX}/lib" -maxdepth 1 -name "${lib}.*.dylib" -type l | grep -E "${lib}\.[0-9]+\.dylib$" | head -n1)")
+            else
+              soname=$(basename "$(find "${FFMPEG_PREFIX}/lib" -maxdepth 1 -name "${lib}.so.*" -type l | head -n1)")
+            fi
+            if [ -n "$soname" ] && [ "$soname" != "$(basename "$real_path")" ]; then
+              (cd "${STAGE}" && ln -sf "$(basename "$real_path")" "$soname")
+            fi
+          done
+
+          # Patch the NIF so it looks for the bundled libs next to
+          # itself rather than at the absolute prefix recorded by the
+          # linker. `$ORIGIN` is the loader's literal-string placeholder
+          # for the directory containing the loaded ELF / Mach-O image.
+          if [ "$(uname)" = "Darwin" ]; then
+            # macOS: rewrite every absolute load command pointing at
+            # the FFmpeg prefix to a @loader_path one.
+            for dep in $(otool -L "${STAGE}/${LIB_NAME}" | awk 'NR > 1 {print $1}'); do
+              case "$dep" in
+                ${FFMPEG_PREFIX}/lib/*)
+                  install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" "${STAGE}/${LIB_NAME}"
+                  ;;
+              esac
+            done
+          else
+            patchelf --set-rpath '$ORIGIN' "${STAGE}/${LIB_NAME}"
+          fi
+
+          # Verify the bundle: every NEEDED / LC_LOAD_DYLIB pointing at
+          # FFmpeg should now resolve relative to the tarball.
+          if [ "$(uname)" = "Darwin" ]; then
+            otool -L "${STAGE}/${LIB_NAME}"
+          else
+            ldd "${STAGE}/${LIB_NAME}" || true
+          fi
+          ls -la "${STAGE}"
+
+          tar -czf "${LIB_NAME}.tar.gz" -C "${STAGE}" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nif-${{ matrix.id }}
+          path: "*exmpeg_native-*.tar.gz"
+          if-no-files-found: error
+
+  tag:
+    runs-on: ubuntu-24.04
+    needs: [detect, build]
+    # Gate the tag on build success so a failed matrix doesn't leave an
+    # orphan tag that blocks future automatic releases (the `detect`
+    # job otherwise treats `VERSION == PREVIOUS_VERSION` as "nothing
+    # to do" on the retry push).
+    if: github.event_name == 'push' && needs.detect.outputs.should_release == 'true' && needs.detect.outputs.tag_exists != 'true' && needs.build.result == 'success'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.detect.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Create and push release tag
+        env:
+          TAG: ${{ needs.detect.outputs.tag }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag "$TAG"
+          git push origin "$TAG"
+
+  release:
+    name: GitHub Release
+    needs:
+      - detect
+      - build
+      - tag
+    if: always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && (needs.tag.result == 'success' || needs.tag.result == 'skipped')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: nif-*
+          merge-multiple: true
+          path: artifacts/
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Generate SHA256SUMS
+        working-directory: artifacts
+        run: sha256sum *.tar.gz | tee SHA256SUMS
+
+      - name: Create release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ needs.detect.outputs.tag }}
+          target_commitish: ${{ needs.detect.outputs.sha }}
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+          generate_release_notes: true

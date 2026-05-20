@@ -1,0 +1,33 @@
+# Mix
+/_build/
+/cover/
+/deps/
+/doc/
+/tmp/
+erl_crash.dump
+*.ez
+
+# Hex tarball
+exmpeg-*.tar
+
+# Rust native artifacts
+native/*/target/
+priv/native/
+
+# Test fixtures generated on the fly
+test/fixtures/*
+!test/fixtures/.gitkeep
+
+# Local caches
+.cargo-home/
+.hex-home/
+.mix-home/
+
+# devenv runtime state (devenv.lock is checked in)
+.dev/
+.devenv/
+.direnv/
+devenv.yaml
+
+# Claude
+.claude/
