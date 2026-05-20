@@ -69,6 +69,11 @@ tasks:
       - mix credo --strict
       - cargo clippy --manifest-path {{.CARGO_MANIFEST}} --all-targets -- -D warnings
 
+  test:zizmor:
+    desc: Lint GitHub Actions workflows for security issues
+    cmds:
+      - zizmor --offline --persona=pedantic .github/workflows
+
   docs:
     desc: Build HexDocs into doc/
     cmds:
@@ -104,3 +109,4 @@ tasks:
       - task: lint
       - task: test
       - task: test:rust
+      - task: test:zizmor

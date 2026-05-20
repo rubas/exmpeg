@@ -10,17 +10,7 @@ on:
         description: "Tag to build and publish (e.g., v0.1.0)"
         required: true
 
-permissions:
-  contents: write
-
-concurrency:
-  # Prefer the workflow_dispatch tag over the branch name: `ref_name` is
-  # always set for manual dispatches (it carries the branch the
-  # workflow was launched from), so the previous `github.ref_name ||
-  # inputs.tag` ordering collapsed two distinct manual tag-builds from
-  # `main` into the same concurrency group.
-  group: release-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}
-  cancel-in-progress: false
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,7 +19,17 @@ env:
 
 jobs:
   detect:
+    name: Detect release target
     runs-on: ubuntu-24.04
+    permissions: {}
+    concurrency:
+      # Prefer the workflow_dispatch tag over the branch name: `ref_name`
+      # is always set for manual dispatches (it carries the branch the
+      # workflow was launched from), so the previous `github.ref_name ||
+      # inputs.tag` ordering collapsed two distinct manual tag-builds
+      # from `main` into the same concurrency group.
+      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-detect
+      cancel-in-progress: false
     outputs:
       should_release: ${{ steps.resolve.outputs.should_release }}
       tag: ${{ steps.resolve.outputs.tag }}
@@ -41,6 +41,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve release target
         id: resolve
@@ -114,6 +115,11 @@ jobs:
     if: needs.detect.outputs.should_release == 'true'
     name: ${{ matrix.id }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read # checkout + build only; uploads go through the actions cache/artifacts API
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-build-${{ matrix.id }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -145,8 +151,11 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ needs.detect.outputs.sha }}
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # dtolnay/rust-toolchain pins the exact toolchain + cross targets;
+      # raw rustup scripting would lose that pinning and cross-target setup.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable # zizmor: ignore[superfluous-actions]
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
@@ -393,7 +402,11 @@ jobs:
           if-no-files-found: error
 
   tag:
+    name: Push release tag
     runs-on: ubuntu-24.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-tag
+      cancel-in-progress: false
     needs: [detect, build]
     # Gate the tag on build success so a failed matrix doesn't leave an
     # orphan tag that blocks future automatic releases (the `detect`
@@ -401,9 +414,11 @@ jobs:
     # to do" on the retry push).
     if: github.event_name == 'push' && needs.detect.outputs.should_release == 'true' && needs.detect.outputs.tag_exists != 'true' && needs.build.result == 'success'
     permissions:
-      contents: write
+      contents: write # creates and pushes the release tag
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # This job pushes the release tag, so the checkout credentials must
+      # persist for `git push origin "$TAG"`.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2 # zizmor: ignore[artipacked]
         with:
           ref: ${{ needs.detect.outputs.sha }}
           fetch-depth: 0
@@ -425,6 +440,11 @@ jobs:
       - tag
     if: always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && (needs.tag.result == 'success' || needs.tag.result == 'skipped')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write # creates the GitHub release and uploads the tarballs
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-release
+      cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -439,8 +459,10 @@ jobs:
         working-directory: artifacts
         run: sha256sum *.tar.gz | tee SHA256SUMS
 
+      # action-gh-release handles release-notes generation and multi-file
+      # upload with retry that a hand-rolled `gh release` step would reimplement.
       - name: Create release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ needs.detect.outputs.tag }}
           target_commitish: ${{ needs.detect.outputs.sha }}
