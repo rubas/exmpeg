@@ -5,12 +5,7 @@ on:
     branches: [main]
   pull_request:
 
-permissions:
-  contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+permissions: {}
 
 env:
   MIX_ENV: test
@@ -23,9 +18,16 @@ jobs:
   check:
     name: Elixir + Rust verification
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read # checkout only; CI does not write to the repo
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-check
+      cancel-in-progress: true
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Shared build env
         uses: ./.github/actions/setup
@@ -34,6 +36,14 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           rust-components: "rustfmt, clippy"
+
+      - name: Install zizmor
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/zizmorcore/zizmor/releases/download/v1.25.2/zizmor-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.local/bin" zizmor
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run full check (Elixir + Rust)
         run: task check
