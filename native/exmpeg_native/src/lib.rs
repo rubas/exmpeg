@@ -1,7 +1,7 @@
 //! Rustler NIF over the `rsmpeg` Rust bindings for FFmpeg 8. Every entry
 //! point returns `{:ok, value}` or `{:error, %{type, message, details}}`
-//! and runs on a dirty CPU scheduler when the underlying work touches
-//! disk I/O or libavformat state.
+//! and runs on a dirty scheduler when the underlying work blocks on disk
+//! I/O, libavformat state, or codec processing.
 
 #![deny(unsafe_code)]
 
