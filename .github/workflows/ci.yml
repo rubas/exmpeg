@@ -9,7 +9,7 @@ permissions: {}
 
 env:
   MIX_ENV: test
-  ELIXIR_VERSION: "1.20.0"
+  ELIXIR_VERSION: "1.20.1"
   OTP_VERSION: "29.0"
   RUST_TOOLCHAIN: "1.94.1"
   EXMPEG_BUILD: "1"
