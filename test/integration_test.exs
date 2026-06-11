@@ -69,6 +69,22 @@ defmodule Exmpeg.IntegrationTest do
     assert format.duration_s < 1.5
   end
 
+  test "remux to an unknown output extension returns :unsupported", %{clip: clip} do
+    out = Path.join(System.tmp_dir!(), "exmpeg_bad_#{System.unique_integer([:positive])}.xyz")
+    on_exit(fn -> File.rm(out) end)
+
+    assert {:error, %Exmpeg.Error{reason: :unsupported}} = Exmpeg.remux(clip, out)
+  end
+
+  test "remux of a video into a codec-incompatible container returns :unsupported", %{clip: clip} do
+    # .wav has a muxer, but it cannot hold an h264 video stream; the
+    # failure surfaces from write_header as :unsupported, not :io_error.
+    out = Path.join(System.tmp_dir!(), "exmpeg_badcodec_#{System.unique_integer([:positive])}.wav")
+    on_exit(fn -> File.rm(out) end)
+
+    assert {:error, %Exmpeg.Error{reason: :unsupported}} = Exmpeg.remux(clip, out)
+  end
+
   test "extract_frame at a timestamp writes a jpeg of the requested size", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_frame_#{System.unique_integer([:positive])}.jpg")
     on_exit(fn -> File.rm(out) end)

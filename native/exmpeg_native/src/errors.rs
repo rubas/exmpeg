@@ -51,6 +51,30 @@ impl From<rsmpeg::error::RsmpegError> for NativeError {
     }
 }
 
+/// Classify a `write_header` failure on a copy op (remux, concat). The
+/// streams and output file are already set up by that point, so a codec
+/// the chosen muxer cannot hold (e.g. h264 into a `.wav`) fails with
+/// AVERROR(EINVAL) - map only that to `unsupported`. Any other failure
+/// here is a real output I/O error (a full or quota-limited filesystem
+/// returns AVERROR(ENOSPC), an unwritable target EACCES/EIO, ...), so
+/// keep its default classification (`io_error`) rather than mislabeling a
+/// recoverable storage failure as a codec problem. The unknown-extension
+/// case is caught earlier with an explicit muxer lookup, so this does not
+/// shadow a missing muxer.
+pub(crate) fn classify_write_header_error(err: rsmpeg::error::RsmpegError) -> NativeError {
+    // EINVAL is 22 on every supported platform; FFmpeg's `AVERROR(e)`
+    // negates the errno.
+    const AVERROR_EINVAL: i32 = -22;
+    if matches!(err, rsmpeg::error::RsmpegError::AVError(code) if code == AVERROR_EINVAL) {
+        return NativeError::new(
+            "unsupported",
+            "output container does not support one of the input codecs",
+        )
+        .with_detail("cause", format!("{err}"));
+    }
+    NativeError::from(err)
+}
+
 fn classify_rsmpeg_error(err: &rsmpeg::error::RsmpegError) -> &'static str {
     let dbg = format!("{err:?}");
     if dbg.starts_with("OpenInputError")
