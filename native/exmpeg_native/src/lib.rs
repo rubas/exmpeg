@@ -10,6 +10,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use rustler::{Encoder, Env, Term};
 
 mod atomic_output;
+mod audio;
 mod concat;
 mod errors;
 mod extract_audio;
