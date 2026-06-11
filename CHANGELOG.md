@@ -1,5 +1,7 @@
 # Changelog
 
+<<<<<<< conflict 1 of 1
++++++++ tusrsmoz abf10647 "fix: report the real final pts in the remux closing progress tick (#32)" (rebase destination)
 ## Unreleased
 
 ### Changed
@@ -24,6 +26,12 @@
   no `:duration_s` was given, so a subscriber rendering
   `current_pts_s / total_duration_s` sees ~100% at completion rather than
   0%.
+- A Rust panic mid-write no longer leaks the `.partial` file on disk. The
+  output write now arms an RAII guard that removes the partial on any
+  early exit, including a panic unwind (which `catch_unwind` only catches
+  one frame up), and is disarmed only after the rename onto the
+  destination succeeds.
+
 ## 0.3.0 - 2026-05-20
 
 Initial public release. Native Elixir bindings for FFmpeg 8 via the

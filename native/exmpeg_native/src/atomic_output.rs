@@ -46,27 +46,58 @@ where
         }
     }
 
-    match body(&partial) {
-        Ok(value) => match std::fs::rename(&partial, &final_path) {
-            Ok(()) => Ok(value),
-            Err(err) => {
-                let _ = std::fs::remove_file(&partial);
-                Err(NativeError::new(
-                    "io_error",
-                    "could not rename partial output onto destination",
-                )
-                .with_detail("from", partial.display().to_string())
-                .with_detail("to", final_path.display().to_string())
-                .with_detail("cause", err.to_string()))
-            }
-        },
-        Err(err) => {
-            // Best-effort cleanup: if the muxer never created the file
-            // (e.g. invalid path) remove_file will return NotFound and
-            // we ignore it. We do not want to mask the original error
-            // with a cleanup error.
-            let _ = std::fs::remove_file(&partial);
-            Err(err)
+    // Remove the partial on any early exit - an `Err` from `body`, a
+    // failed rename, OR a panic unwinding out of `body` (which
+    // `run_with_panic_protection` catches one frame up, after this scope
+    // has already dropped). The guard is disarmed only once the rename
+    // onto the destination has succeeded.
+    let mut guard = PartialGuard::new(&partial);
+
+    let value = body(&partial)?;
+
+    std::fs::rename(&partial, &final_path).map_err(|err| {
+        NativeError::new(
+            "io_error",
+            "could not rename partial output onto destination",
+        )
+        .with_detail("from", partial.display().to_string())
+        .with_detail("to", final_path.display().to_string())
+        .with_detail("cause", err.to_string())
+    })?;
+
+    guard.disarm();
+    Ok(value)
+}
+
+/// Removes the `.partial` file when dropped unless disarmed. This covers
+/// the panic path the explicit error branches cannot: a panic inside
+/// `body` unwinds past `run` before any value is produced, and
+/// `catch_unwind` sits a frame up in `lib.rs`, so without this guard the
+/// partial would leak on disk.
+struct PartialGuard<'a> {
+    partial: &'a Path,
+    armed: bool,
+}
+
+impl<'a> PartialGuard<'a> {
+    fn new(partial: &'a Path) -> Self {
+        Self {
+            partial,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best effort: a NotFound (the muxer never created the file)
+            // is fine, and we must not mask the original failure.
+            let _ = std::fs::remove_file(self.partial);
         }
     }
 }
@@ -173,6 +204,29 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(std::fs::read(&final_path).unwrap(), b"fresh");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn removes_partial_when_body_panics() {
+        let dir = tempdir();
+        let final_path = dir.join("out.bin");
+        let partial = partial_path_for(&final_path);
+
+        // Mirror the production layering: `catch_unwind` wraps `run` a
+        // frame up, so the guard must remove the partial during unwind.
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(final_path.to_str().unwrap(), |p| {
+                std::fs::write(p, b"half-written").unwrap();
+                panic!("boom");
+                #[allow(unreachable_code)]
+                Ok::<_, NativeError>(())
+            })
+        }));
+
+        assert!(caught.is_err(), "the panic should propagate out of run");
+        assert!(!partial.exists(), "the partial must be cleaned up on panic");
+        assert!(!final_path.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
