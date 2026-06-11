@@ -7,7 +7,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use rustler::{Encoder, Env, Term};
+use rustler::{Binary, Encoder, Env, ResourceArc, Term};
 
 mod atomic_output;
 mod audio;
@@ -60,6 +60,28 @@ fn encode_result<T: Encoder>(env: Env<'_>, result: Result<T, NativeError>) -> Te
 #[rustler::nif]
 fn nif_version(env: Env<'_>) -> Term<'_> {
     let result = run_with_panic_protection(|| Ok(version::version_info()));
+    encode_result(env, result)
+}
+
+/// Copies a binary into a refcounted `BufferResource` once and returns
+/// it as an opaque `Exmpeg.Buffer` reference, so the caller can reuse it
+/// across operations without re-copying the input on every call.
+///
+/// Runs on a dirty scheduler: the `to_vec` copies the whole binary, which
+/// for a large clip would otherwise stall a normal BEAM scheduler.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn nif_load_buffer<'a>(env: Env<'a>, bin: Binary<'a>) -> Term<'a> {
+    let result = run_with_panic_protection(|| {
+        if bin.as_slice().is_empty() {
+            return Err(NativeError::new(
+                "invalid_request",
+                "buffer binary is empty",
+            ));
+        }
+        Ok(ResourceArc::new(input::BufferResource {
+            bytes: bin.as_slice().to_vec(),
+        }))
+    });
     encode_result(env, result)
 }
 

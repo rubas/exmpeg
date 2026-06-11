@@ -98,6 +98,15 @@
   layout and the encoder accepts arbitrary chunk sizes (the PCM case),
   sending each decoded frame straight to the encoder. Output is
   unchanged; the conversion path is unaffected.
+
+### Added
+
+- `Exmpeg.load_buffer/1` returns an opaque, reusable `Exmpeg.Buffer` for
+  in-memory input. Unlike `{:memory, binary}`, which copies the whole
+  binary into the NIF on every call, a buffer copies the bytes once into
+  a refcounted native resource; passing it to later operations (or as
+  repeated `concat/3` inputs) is then a refcount bump, not another copy.
+  A buffer is accepted anywhere an input source is.
 ## 0.3.0 - 2026-05-20
 
 Initial public release. Native Elixir bindings for FFmpeg 8 via the

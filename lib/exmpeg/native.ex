@@ -26,14 +26,18 @@ defmodule Exmpeg.Native do
     )
 
   @typedoc """
-  Input source. A plain string is a filesystem path; `{:memory, binary}`
-  hands the entire input buffered in memory to a custom AVIOContext.
+  Input source as seen by the NIF: a filesystem path string,
+  `{:memory, binary}`, or a loaded buffer resource reference.
   """
-  @type input_source :: String.t() | {:memory, binary()}
+  @type input_source :: String.t() | {:memory, binary()} | reference()
 
   @doc "Reports the FFmpeg version + configure flags this NIF is linked against."
   @spec version() :: {:ok, map()} | {:error, map()}
   def version, do: nif_version()
+
+  @doc "Copies a binary into a refcounted resource and returns its reference."
+  @spec load_buffer(binary()) :: {:ok, reference()} | {:error, map()}
+  def load_buffer(binary), do: nif_load_buffer(binary)
 
   @doc "Probes a media file and returns format + per-stream metadata."
   @spec probe(input_source()) :: {:ok, map()} | {:error, map()}
@@ -60,6 +64,7 @@ defmodule Exmpeg.Native do
   def transcode(input, output, opts), do: nif_transcode(input, output, opts)
 
   defp nif_version, do: :erlang.nif_error(:nif_not_loaded)
+  defp nif_load_buffer(_binary), do: :erlang.nif_error(:nif_not_loaded)
   defp nif_probe(_source), do: :erlang.nif_error(:nif_not_loaded)
   defp nif_remux(_source, _output, _opts), do: :erlang.nif_error(:nif_not_loaded)
   defp nif_extract_frame(_source, _output, _opts), do: :erlang.nif_error(:nif_not_loaded)

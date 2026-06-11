@@ -128,7 +128,7 @@ The library does not currently ship:
 If you need one of these, file an issue with the use case rather than
 shelling out to the CLI as a workaround.
 
-## Memory inputs and progress (already shipped in v0.1)
+## Memory inputs and progress
 
 Every read-side op (`probe/1`, `extract_frame/3`, `extract_audio/3`,
 `remux/3`, `concat/3`, `transcode/3`) accepts `{:memory, binary}` in
@@ -137,3 +137,22 @@ place of a path. `remux/3`, `extract_audio/3`, `concat/3`, and
 `{:exmpeg_progress, %{...}}` messages to the pid. Wrap the call in
 `Task.async/1` if you want to receive those messages while the NIF
 runs.
+
+## Reuse in-memory bytes with a buffer, not `{:memory, _}`
+
+- `{:memory, binary}` copies the whole binary into the NIF on every
+  call. Probing then transcoding the same bytes copies them twice; an
+  N-input `concat/3` of memory inputs holds N copies at once.
+- When the same bytes feed more than one call, `Exmpeg.load_buffer/1`
+  copies once into a reusable `Exmpeg.Buffer` and every later call is a
+  refcount bump:
+
+  ```elixir
+  {:ok, buf} = Exmpeg.load_buffer(File.read!("clip.mp4"))
+  {:ok, info} = Exmpeg.probe(buf)
+  {:ok, _} = Exmpeg.transcode(buf, "out.webm", video_codec: "libvpx-vp9")
+  ```
+
+- A buffer is accepted anywhere an input source is, including inside a
+  `concat/3` list. For a single one-shot read, `{:memory, _}` or a path
+  is fine; for large or reused media, prefer a path or a buffer.

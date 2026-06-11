@@ -1,9 +1,14 @@
-//! Input-source abstraction: a path on disk or an in-memory binary,
-//! both opened through the same `AVFormatContextInput` API.
+//! Input-source abstraction: a path on disk, an in-memory binary, or a
+//! pre-loaded `Exmpeg.Buffer` resource, all opened through the same
+//! `AVFormatContextInput` API.
 //!
-//! Memory inputs are backed by an `AVIOContextCustom` with read + seek
-//! callbacks operating on a `Vec<u8>` that lives for the lifetime of
-//! the format context.
+//! In-memory inputs (both `{:memory, binary}` and a loaded buffer) are
+//! backed by an `AVIOContextCustom` with read + seek callbacks. The
+//! bytes live in a `SharedBytes` handle captured by the callbacks: for
+//! `{:memory, _}` the binary is copied into an owned `Vec` once per
+//! call; for a loaded buffer the bytes live in a refcounted resource, so
+//! repeated operations on the same buffer (probe then transcode, or N
+//! concat inputs) share one copy instead of copying per call.
 
 use std::ffi::{CStr, CString};
 use std::path::Path;
@@ -14,7 +19,7 @@ use rsmpeg::avformat::{AVFormatContextInput, AVIOContextContainer, AVIOContextCu
 use rsmpeg::avutil::{AVDictionary, AVMem};
 use rsmpeg::ffi;
 use rustler::types::tuple::get_tuple;
-use rustler::{Binary, Decoder, Env, NifResult, Term};
+use rustler::{Binary, Decoder, Env, NifResult, Resource, ResourceArc, Term};
 
 use crate::errors::NativeError;
 
@@ -24,23 +29,70 @@ mod atoms {
     }
 }
 
+/// Refcounted byte buffer handed across the NIF boundary as an opaque
+/// `Exmpeg.Buffer`. Holding the input in a resource lets the caller load
+/// it once and reuse it across operations without re-copying the binary
+/// into the Rust heap on every call.
+pub(crate) struct BufferResource {
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[rustler::resource_impl]
+impl Resource for BufferResource {}
+
+/// Shared, clonable handle to in-memory input bytes. Both variants are
+/// cheap to clone (a refcount bump) and read-only, so the read and seek
+/// AVIO callbacks each capture their own clone.
+#[derive(Clone)]
+enum SharedBytes {
+    /// Bytes copied once from a `{:memory, binary}` term.
+    Owned(Arc<Vec<u8>>),
+    /// Bytes living in a loaded `Exmpeg.Buffer` resource (no copy).
+    Resource(ResourceArc<BufferResource>),
+}
+
+impl SharedBytes {
+    fn slice(&self) -> &[u8] {
+        match self {
+            SharedBytes::Owned(v) => v.as_slice(),
+            SharedBytes::Resource(r) => r.bytes.as_slice(),
+        }
+    }
+}
+
 /// Caller-supplied input. `Path` is a regular filesystem path; `Memory`
-/// holds the entire input buffered in memory.
+/// holds a per-call copy of an in-memory binary; `Buffer` references a
+/// pre-loaded resource that several calls can share.
 pub(crate) enum InputSource {
     Path(String),
     Memory(Vec<u8>),
+    Buffer(ResourceArc<BufferResource>),
 }
 
 impl InputSource {
     /// Open the source as an `AVFormatContextInput`. For paths, that's
-    /// the usual `avformat_open_input`. For memory inputs it constructs
-    /// a custom AVIO context with seek support so demuxers that need to
-    /// jump around the file (mp4 looking for `moov`, matroska reading
-    /// cues) still work.
+    /// the usual `avformat_open_input`. For in-memory inputs it
+    /// constructs a custom AVIO context with seek support so demuxers
+    /// that need to jump around the file (mp4 looking for `moov`,
+    /// matroska reading cues) still work.
     pub(crate) fn open(self) -> Result<AVFormatContextInput, NativeError> {
         match self {
             InputSource::Path(path) => open_path(&path),
-            InputSource::Memory(bytes) => open_memory(bytes),
+            InputSource::Memory(bytes) => {
+                if bytes.is_empty() {
+                    return Err(NativeError::new(
+                        "invalid_request",
+                        "memory input is an empty binary",
+                    ));
+                }
+                open_avio(SharedBytes::Owned(Arc::new(bytes)))
+            }
+            InputSource::Buffer(buf) => {
+                if buf.bytes.is_empty() {
+                    return Err(NativeError::new("invalid_request", "buffer input is empty"));
+                }
+                open_avio(SharedBytes::Resource(buf))
+            }
         }
     }
 
@@ -49,6 +101,7 @@ impl InputSource {
         match self {
             InputSource::Path(p) => p.clone(),
             InputSource::Memory(bytes) => format!("<memory:{} bytes>", bytes.len()),
+            InputSource::Buffer(buf) => format!("<buffer:{} bytes>", buf.bytes.len()),
         }
     }
 }
@@ -58,6 +111,10 @@ impl<'a> Decoder<'a> for InputSource {
         // Plain string is a path.
         if let Ok(s) = String::decode(term) {
             return Ok(InputSource::Path(s));
+        }
+        // An `Exmpeg.Buffer` reference decodes as our resource type.
+        if let Ok(buf) = ResourceArc::<BufferResource>::decode(term) {
+            return Ok(InputSource::Buffer(buf));
         }
         // Tagged tuple `{:memory, <<...>>}` is an in-memory binary.
         let Ok(items) = get_tuple(term) else {
@@ -133,26 +190,24 @@ fn open_path(path: &str) -> Result<AVFormatContextInput, NativeError> {
         .map_err(NativeError::from)
 }
 
-fn open_memory(bytes: Vec<u8>) -> Result<AVFormatContextInput, NativeError> {
-    if bytes.is_empty() {
-        return Err(NativeError::new(
-            "invalid_request",
-            "memory input is an empty binary",
-        ));
-    }
-
+fn open_avio(bytes: SharedBytes) -> Result<AVFormatContextInput, NativeError> {
     let cursor = Arc::new(AtomicUsize::new(0));
     let read_cursor = Arc::clone(&cursor);
+    let read_bytes = bytes.clone();
     let seek_cursor = cursor;
+    let seek_bytes = bytes;
 
-    // `data` (the Vec<u8>) is moved into the AVIOContextCustom and
-    // re-borrowed by each callback invocation. The cursor lives outside
-    // in an Arc<AtomicUsize> so read and seek share state.
+    // The AVIO `data` slot is unused: the bytes come from the captured
+    // `SharedBytes` handle (an owned `Arc<Vec>` for `{:memory, _}`, or a
+    // resource refcount for a loaded buffer) so the buffer path never
+    // copies. The cursor lives outside in an `Arc<AtomicUsize>` so read
+    // and seek share state.
     let io = AVIOContextCustom::alloc_context(
         AVMem::new(IO_BUF_LEN),
         false,
-        bytes,
-        Some(Box::new(move |data, buf| {
+        Vec::new(),
+        Some(Box::new(move |_data, buf| {
+            let data = read_bytes.slice();
             let cur = read_cursor.load(Ordering::Relaxed);
             if cur >= data.len() {
                 return ffi::AVERROR_EOF;
@@ -164,14 +219,14 @@ fn open_memory(bytes: Vec<u8>) -> Result<AVFormatContextInput, NativeError> {
             n as i32
         })),
         None,
-        Some(Box::new(move |data, offset, whence| {
+        Some(Box::new(move |_data, offset, whence| {
             // libavformat encodes `whence` as either a stdio `SEEK_*`
             // value (0/1/2) or the special `AVSEEK_SIZE` flag asking
             // for the total length. `AVSEEK_FORCE` may also be OR'd in;
             // we mask it off.
             let avseek_size = ffi::AVSEEK_SIZE as i32;
             let avseek_force = ffi::AVSEEK_FORCE as i32;
-            let len = data.len() as i64;
+            let len = seek_bytes.slice().len() as i64;
 
             let cleaned = whence & !avseek_force;
             if cleaned == avseek_size {
