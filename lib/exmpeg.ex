@@ -38,11 +38,19 @@ defmodule Exmpeg do
   ## Output atomicity
 
   Operations that write to disk (`remux/3`, `extract_frame/3`,
-  `extract_audio/3`, `concat/3`, `transcode/3`) write to a sibling
-  `<stem>.partial.<ext>` file and rename onto the final path only
-  after the muxer trailer has been written successfully. A failure
-  mid-encode removes the partial file so the destination is never
-  left half-written.
+  `extract_audio/3`, `concat/3`, `transcode/3`) write to a unique
+  sibling `<stem>.partial.<nonce>.<ext>` file and rename onto the final
+  path only after the muxer trailer has been written successfully. A
+  failure mid-encode removes that partial file so the destination is
+  never left half-written.
+
+  The partial path is unique per call, so two writes to the same
+  destination (duplicate jobs, a retry racing a slow first attempt,
+  two nodes on shared storage) never share a partial and cannot corrupt
+  each other. The resulting guarantee is last-complete-rename-wins:
+  every state an observer can see at the destination is a complete file.
+  A hard crash mid-write may leave a `<stem>.partial.*` sibling behind
+  (it is never renamed onto the destination); sweep those if needed.
   """
 
   alias Exmpeg.{Error, MediaInfo, Native, Stream}

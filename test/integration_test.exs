@@ -354,11 +354,10 @@ defmodule Exmpeg.IntegrationTest do
   test "extract_frame rejects an audio-only input" do
     audio = TestFixtures.ensure_audio_only_clip!()
     out = Path.join(System.tmp_dir!(), "exmpeg_noframe_#{System.unique_integer([:positive])}.jpg")
-    partial = partial_output_path(out)
 
     on_exit(fn ->
       File.rm(out)
-      File.rm(partial)
+      out |> partials_for() |> Enum.each(&File.rm/1)
     end)
 
     assert {:error, %Exmpeg.Error{reason: :invalid_request, message: msg}} =
@@ -366,7 +365,37 @@ defmodule Exmpeg.IntegrationTest do
 
     assert msg =~ "no video stream"
     refute File.exists?(out)
-    refute File.exists?(partial)
+    assert partials_for(out) == []
+  end
+
+  test "concurrent writes to the same output resolve to a complete file", %{clip: clip} do
+    # Each call writes to a unique `<stem>.partial.<nonce>.<ext>`, so
+    # racing writes to one destination never share a partial. Both
+    # complete, the renames are atomic, and the destination is always a
+    # whole file (last-complete-rename-wins) - never a half-written mix.
+    out = Path.join(System.tmp_dir!(), "exmpeg_race_#{System.unique_integer([:positive])}.mp4")
+
+    on_exit(fn ->
+      File.rm(out)
+      out |> partials_for() |> Enum.each(&File.rm/1)
+    end)
+
+    results =
+      1..3
+      |> Enum.map(fn _ ->
+        Task.async(fn ->
+          Exmpeg.transcode(clip, out, video_codec: "libx264", audio_codec: "aac", width: 80)
+        end)
+      end)
+      |> Task.await_many(60_000)
+
+    assert Enum.all?(results, &match?({:ok, _}, &1))
+
+    # The destination probes as a complete, valid file and no partial
+    # sibling is left behind.
+    assert {:ok, %MediaInfo{streams: streams}} = Exmpeg.probe(out)
+    assert Enum.any?(streams, &(&1.kind == :video and &1.codec == "h264"))
+    assert partials_for(out) == []
   end
 
   test "extract_audio rejects a video-only input" do
@@ -567,14 +596,10 @@ defmodule Exmpeg.IntegrationTest do
     end
   end
 
-  defp partial_output_path(path) do
-    root = Path.rootname(path)
-    ext = Path.extname(path)
-
-    if ext == "" do
-      root <> ".partial"
-    else
-      root <> ".partial" <> ext
-    end
+  # All `<stem>.partial*` siblings of an output path. The partial name
+  # carries a per-call nonce, so glob the infix rather than predict it.
+  defp partials_for(out) do
+    root = Path.rootname(out)
+    Path.wildcard(root <> ".partial*")
   end
 end
