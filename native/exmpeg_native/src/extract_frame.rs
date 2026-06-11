@@ -14,8 +14,9 @@ use rsmpeg::avutil::{AVDictionary, AVFrame};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 use rsmpeg::swscale::SwsContext;
-use rustler::NifMap;
+use rustler::{Env, NifMap};
 
+use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 
 #[derive(Debug, Default, NifMap)]
@@ -47,6 +48,7 @@ pub(crate) struct ExtractFrameStats {
 }
 
 pub(crate) fn extract_frame<Q: AsRef<Path>>(
+    env: Env<'_>,
     source: crate::input::InputSource,
     output_path: Q,
     opts: &ExtractFrameOpts,
@@ -55,6 +57,7 @@ pub(crate) fn extract_frame<Q: AsRef<Path>>(
     let out_url = to_cstring(output_path)?;
 
     let mut input = source.open()?;
+    let mut cancel = CancelGuard::new(env);
 
     let (video_index, decoder_codec) = find_video_stream(&input)?;
 
@@ -82,6 +85,7 @@ pub(crate) fn extract_frame<Q: AsRef<Path>>(
         video_index,
         stream_time_base,
         target_s,
+        &mut cancel,
     )?;
 
     let encoder_codec_id = pick_image_codec(output_path)?;
@@ -208,6 +212,7 @@ fn decode_target_frame(
     video_index: usize,
     time_base: ffi::AVRational,
     target_s: f64,
+    cancel: &mut CancelGuard,
 ) -> Result<AVFrame, NativeError> {
     let target_pts =
         (target_s * f64::from(time_base.den) / f64::from(time_base.num)).round() as i64;
@@ -220,6 +225,7 @@ fn decode_target_frame(
     let mut last_seen: Option<AVFrame> = None;
 
     while let Some(packet) = input.read_packet()? {
+        cancel.check()?;
         if packet.stream_index as usize != video_index {
             continue;
         }

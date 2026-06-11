@@ -17,6 +17,7 @@ use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
 use crate::progress::ProgressEmitter;
@@ -113,6 +114,7 @@ pub(crate) fn concat<P: AsRef<Path>>(
     // sum every input's container duration before opening), so report
     // `0.0` and let the caller infer progress from packet count.
     let mut progress = ProgressEmitter::new(env, opts.progress, "concat", 0.0);
+    let mut cancel = CancelGuard::new(env);
 
     process_input(
         &mut first,
@@ -121,6 +123,7 @@ pub(crate) fn concat<P: AsRef<Path>>(
         &pts_offset,
         &mut next_min_dts,
         &mut packets_written,
+        &mut cancel,
     )?;
     advance_offsets(
         &first,
@@ -144,6 +147,7 @@ pub(crate) fn concat<P: AsRef<Path>>(
             &pts_offset,
             &mut next_min_dts,
             &mut packets_written,
+            &mut cancel,
         )?;
         advance_offsets(
             &input,
@@ -173,8 +177,10 @@ fn process_input(
     pts_offset: &[i64],
     next_min_dts: &mut [i64],
     packets_written: &mut u64,
+    cancel: &mut CancelGuard,
 ) -> Result<(), NativeError> {
     while let Some(mut packet) = input.read_packet()? {
+        cancel.check()?;
         let idx = packet.stream_index as usize;
         if idx >= out_time_bases.len() {
             continue;

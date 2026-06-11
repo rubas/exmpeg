@@ -186,7 +186,16 @@ and the matching runtime libs at load time.
 Every call returns either `{:ok, value}` or `{:error, %Exmpeg.Error{}}`.
 `t:Exmpeg.Error.reason/0` enumerates the categories: `:invalid_request`,
 `:io_error`, `:decode_error`, `:encode_error`, `:unsupported`,
-`:runtime_error`, `:nif_panic`, `:native_error`.
+`:runtime_error`, `:cancelled`, `:nif_panic`, `:native_error`.
+
+A long-running operation (`remux/3`, `extract_frame/3`, `extract_audio/3`,
+`concat/3`, `transcode/3`) checks whether the calling process is still
+alive roughly every 100 ms. If the caller dies mid-operation - a `Task`
+timeout, a supervised shutdown, a disconnect - the native work stops at
+the next check, the partial output is removed, and the call resolves to
+`{:error, %Exmpeg.Error{reason: :cancelled}}` (which the dead caller
+never observes). The operation is uninterruptible between checks;
+`probe/1` is not cancellable.
 
 ## Development
 
