@@ -49,6 +49,11 @@
   another's in-progress output. The guarantee is now
   last-complete-rename-wins: every observable destination state is a
   complete file.
+- Several inputs that passed option validation but then raised inside the
+  NIF decode now return `{:error, %Exmpeg.Error{reason: :invalid_request}}`
+  as the contract promises: an `:fps` component past the i32 range, a
+  bitrate past the i64 range, a non-UTF-8 path/output binary, and an opts
+  list containing a non-`{key, value}` element.
 
 ### Security
 

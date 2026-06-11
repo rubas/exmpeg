@@ -546,10 +546,20 @@ defmodule Exmpeg do
 
   @spec validate_non_empty_string(String.t(), atom()) :: :ok | {:error, Error.t()}
   defp validate_non_empty_string(value, name) when is_binary(value) do
-    if String.trim(value) == "" do
-      {:error, Error.new(:invalid_request, "#{name} must be a non-empty string")}
-    else
-      :ok
+    cond do
+      # rustler decodes the path/output as a Rust `String`, which requires
+      # valid UTF-8. A non-UTF-8 binary (legal on Linux, e.g. from
+      # `File.ls/1`) would otherwise raise inside the NIF decode rather
+      # than returning an error tuple, so reject it here. (`String.trim/1`
+      # would itself raise on invalid UTF-8, so this check comes first.)
+      not String.valid?(value) ->
+        {:error, Error.new(:invalid_request, "#{name} must be valid UTF-8")}
+
+      String.trim(value) == "" ->
+        {:error, Error.new(:invalid_request, "#{name} must be a non-empty string")}
+
+      true ->
+        :ok
     end
   end
 
@@ -600,7 +610,7 @@ defmodule Exmpeg do
     %{
       sample_rate: &sample_rate?/1,
       channels: &channel_count?/1,
-      bitrate: &positive_integer?/1,
+      bitrate: &bitrate?/1,
       progress: &is_pid/1
     }
   end
@@ -609,8 +619,8 @@ defmodule Exmpeg do
     %{
       video_codec: &non_empty_string?/1,
       audio_codec: &non_empty_string?/1,
-      video_bitrate: &positive_integer?/1,
-      audio_bitrate: &positive_integer?/1,
+      video_bitrate: &bitrate?/1,
+      audio_bitrate: &bitrate?/1,
       width: &dimension?/1,
       height: &dimension?/1,
       fps: &fps_tuple?/1,
@@ -625,16 +635,33 @@ defmodule Exmpeg do
     }
   end
 
-  defp non_empty_string?(v), do: is_binary(v) and String.trim(v) != ""
+  # String-valued options (codec names, the filter spec) are decoded as
+  # Rust `String`s, so require valid UTF-8 here too - a non-UTF-8 binary
+  # would otherwise raise during the Rustler decode instead of returning
+  # an error tuple. `String.trim/1` raises on invalid UTF-8, so the
+  # validity check comes first.
+  defp non_empty_string?(v), do: is_binary(v) and String.valid?(v) and String.trim(v) != ""
 
-  defp fps_tuple?({num, den}), do: is_integer(num) and is_integer(den) and num > 0 and den > 0
+  # The NIF decodes `fps` as `Option<(i32, i32)>`, so a component past
+  # the i32 range would raise inside the decode rather than returning an
+  # error tuple. Bound both components to the i32 max.
+  @max_i32 2_147_483_647
+  defp fps_tuple?({num, den}) do
+    is_integer(num) and is_integer(den) and num > 0 and den > 0 and num <= @max_i32 and
+      den <= @max_i32
+  end
+
   defp fps_tuple?(_), do: false
 
   defp tags?(tags) when is_map(tags), do: Enum.all?(tags, &valid_tag_pair?/1)
   defp tags?(tags) when is_list(tags), do: Enum.all?(tags, &valid_tag_pair?/1)
   defp tags?(_), do: false
 
-  defp valid_tag_pair?({k, v}), do: is_binary(k) and is_binary(v)
+  # Tag keys and values also become Rust `String`s in the NIF map, so
+  # they must be valid UTF-8 for the same reason.
+  defp valid_tag_pair?({k, v}),
+    do: is_binary(k) and is_binary(v) and String.valid?(k) and String.valid?(v)
+
   defp valid_tag_pair?(_), do: false
 
   @spec validate_concat_inputs([input_source()]) :: :ok | {:error, Error.t()}
@@ -651,8 +678,13 @@ defmodule Exmpeg do
     end)
   end
 
-  defp positive_integer?(v), do: is_integer(v) and v > 0
   defp channel_count?(v), do: is_integer(v) and v in 1..2
+
+  # The NIF decodes bitrates as `Option<i64>`, so a value past the i64
+  # range would raise inside the decode. Cap well under i64 max; 1 Tbps
+  # is far beyond any real media bitrate.
+  @max_bitrate 1_000_000_000_000
+  defp bitrate?(v), do: is_integer(v) and v > 0 and v <= @max_bitrate
 
   # Upper bounds reject absurd sizes at the API boundary. Without them a
   # caller could request e.g. `width: 2_000_000_000`, and the NIF would
@@ -672,6 +704,17 @@ defmodule Exmpeg do
   end
 
   defp check_option({key, value}, validators) do
+    check_known_option(key, value, validators)
+  end
+
+  # An opts list with a non-`{key, value}` element (e.g. `[:fast]`) would
+  # otherwise raise a FunctionClauseError before the NIF runs. Surface it
+  # as the same typed error every other bad option gets.
+  defp check_option(other, _validators) do
+    {:halt, {:error, Error.new(:invalid_request, "options must be {key, value} pairs, got: #{inspect(other)}")}}
+  end
+
+  defp check_known_option(key, value, validators) do
     case Map.fetch(validators, key) do
       :error ->
         {:halt, {:error, Error.new(:invalid_request, "unknown option #{inspect(key)}")}}
