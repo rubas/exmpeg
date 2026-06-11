@@ -277,11 +277,35 @@ defmodule Exmpeg.IntegrationTest do
                video_filter: "crop=iw:ih-20:0:10,scale=80:-2"
              )
 
-    assert {:ok, %MediaInfo{streams: streams}} = Exmpeg.probe(out)
+    assert {:ok, %MediaInfo{format: format, streams: streams}} = Exmpeg.probe(out)
     [video] = Enum.filter(streams, &(&1.kind == :video))
     assert video.video.width == 80
     # The crop removed 20 lines; scale preserved aspect → height < 60.
     assert video.video.height < 60
+
+    # A custom :video_filter chain with no fps filter keeps the input
+    # stream time_base on the buffersink. Stepping pts by a bare 1 there
+    # collapses the output to a few microseconds; stepping by one frame
+    # interval keeps the real ~2 s duration.
+    assert format.duration_s > 1.5 and format.duration_s < 2.5
+  end
+
+  test "transcode :video_filter ignores an overridden :fps for pts timing", %{clip: clip} do
+    # `:video_filter` overrides `:fps`, so the pts step must come from the
+    # source cadence, not the ignored `:fps`. With the bug, a high `:fps`
+    # stamped frames too close together and compressed the duration.
+    out = Path.join(System.tmp_dir!(), "exmpeg_xc6_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> File.rm(out) end)
+
+    assert {:ok, _} =
+             Exmpeg.transcode(clip, out,
+               video_codec: "libx264",
+               video_filter: "crop=iw:ih-20:0:10",
+               fps: {120, 1}
+             )
+
+    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
+    assert format.duration_s > 1.5 and format.duration_s < 2.5
   end
 
   test "transcode drop options and metadata tags are reflected in the output", %{clip: clip} do

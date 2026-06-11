@@ -85,6 +85,27 @@ struct VideoFilterGraph {
     graph: AVFilterGraph,
 }
 
+/// Running output pts for re-encoded video, in the encoder time_base.
+/// Each filtered frame is stamped with `next` which then advances by
+/// `step` (one frame interval). For the default `fps=N/D` chain `step`
+/// is exactly 1 (encoder tb is `1/fps`); for a custom `:video_filter`
+/// without an `fps` filter the sink keeps the input stream time_base, so
+/// `step` is the rescaled frame duration and the output keeps real
+/// timing instead of collapsing to consecutive integers.
+struct VideoPts {
+    next: i64,
+    step: i64,
+}
+
+impl VideoPts {
+    /// Return the pts for the current frame and advance by one interval.
+    fn advance(&mut self) -> i64 {
+        let pts = self.next;
+        self.next += self.step;
+        pts
+    }
+}
+
 enum StreamPipeline {
     Copy {
         in_idx: usize,
@@ -97,7 +118,7 @@ enum StreamPipeline {
         decoder: AVCodecContext,
         encoder: AVCodecContext,
         graph: VideoFilterGraph,
-        next_pts: i64,
+        pts: VideoPts,
     },
     Audio {
         in_idx: usize,
@@ -374,6 +395,26 @@ fn build_video_pipeline(
         }
     });
 
+    // Frame rate used to fill in the buffersink's rate when it reports
+    // `0/0`, for computing the pts step. The default chain appends
+    // `fps=N/D`, so `fps` (opts.fps or the source rate) is authoritative
+    // there. A custom `:video_filter` overrides `:fps` (see
+    // `build_video_filter_spec`), so its timing must come from the source
+    // cadence, not an `:fps` the caller passed but that is ignored - else
+    // a crop-only filter on a 10 fps input with `fps: {60, 1}` would be
+    // stamped at 1/60 s intervals and compressed to a sixth of its
+    // length.
+    let cadence_fps = if opts.video_filter.is_some() {
+        let src = decoder.framerate;
+        if src.num == 0 || src.den == 0 {
+            (25, 1)
+        } else {
+            (src.num, src.den)
+        }
+    } else {
+        fps
+    };
+
     let filter_spec = build_video_filter_spec(opts, heuristic_w, heuristic_h, fps, dst_fmt);
     let graph = build_video_graph(src_w, src_h, src_fmt, in_tb, src_sar, dst_fmt, &filter_spec)?;
 
@@ -390,8 +431,8 @@ fn build_video_pipeline(
         let fr = sink.get_frame_rate();
         let frame_rate = if fr.den == 0 || fr.num == 0 {
             ffi::AVRational {
-                num: fps.0,
-                den: fps.1,
+                num: cadence_fps.0,
+                den: cadence_fps.1,
             }
         } else {
             fr
@@ -416,6 +457,24 @@ fn build_video_pipeline(
     }
     encoder.open(None)?;
 
+    // One frame interval expressed in the encoder time_base. The drain
+    // loop re-times every filtered frame to a consecutive multiple of
+    // this step. `av_rescale_q(1, 1/frame_rate, out_tb)` is exactly 1 for
+    // the default `fps=N/D` chain (out_tb is `1/fps`), but for a custom
+    // `:video_filter` without an `fps` filter the sink keeps the input
+    // stream time_base, where one frame spans many ticks - stepping by a
+    // bare 1 there collapses the output to a few microseconds. Clamp to
+    // at least 1 so a degenerate frame_rate can never stall pts.
+    let inv_frame_rate = ffi::AVRational {
+        num: out_frame_rate.den,
+        den: out_frame_rate.num,
+    };
+    let pts_step = av_rescale_q(1, inv_frame_rate, out_tb).max(1);
+    let pts = VideoPts {
+        next: 0,
+        step: pts_step,
+    };
+
     let out_idx;
     {
         let mut out_stream = output.new_stream();
@@ -430,7 +489,7 @@ fn build_video_pipeline(
         decoder,
         encoder,
         graph,
-        next_pts: 0,
+        pts,
     })
 }
 
@@ -626,7 +685,7 @@ fn process_video_packet(
         decoder,
         encoder,
         graph,
-        next_pts,
+        pts,
         ..
     } = pipeline
     else {
@@ -648,7 +707,7 @@ fn process_video_packet(
             output,
             *out_idx,
             out_time_bases,
-            next_pts,
+            pts,
             packets_written,
         )?;
     }
@@ -663,7 +722,7 @@ fn process_video_packet(
             output,
             *out_idx,
             out_time_bases,
-            next_pts,
+            pts,
             packets_written,
         )?;
         encoder.send_frame(None)?;
@@ -690,7 +749,7 @@ fn drain_filter_and_encode(
     output: &mut AVFormatContextOutput,
     out_idx: i32,
     out_time_bases: &[ffi::AVRational],
-    next_pts: &mut i64,
+    pts: &mut VideoPts,
     packets_written: &mut u64,
 ) -> Result<(), NativeError> {
     loop {
@@ -707,11 +766,8 @@ fn drain_filter_and_encode(
         };
 
         // Re-time to a monotonically-increasing pts in the encoder's
-        // time_base (1/fps). The filter graph reports time_base on the
-        // sink, but normalising here keeps the encoder happy regardless
-        // of what fps the user requested via :video_filter.
-        filtered.set_pts(*next_pts);
-        *next_pts += 1;
+        // time_base, stepping by one frame interval (see `VideoPts`).
+        filtered.set_pts(pts.advance());
 
         encoder.send_frame(Some(&filtered))?;
         write_drained_packets(encoder, output, out_idx, out_time_bases, packets_written)?;

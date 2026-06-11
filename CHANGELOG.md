@@ -54,6 +54,11 @@
   as the contract promises: an `:fps` component past the i32 range, a
   bitrate past the i64 range, a non-UTF-8 path/output binary, and an opts
   list containing a non-`{key, value}` element.
+- `transcode/3` with a custom `:video_filter` that has no `fps` filter no
+  longer corrupts output timing. Filtered frames are now stepped by one
+  frame interval in the encoder time_base instead of by a bare `1`, so a
+  chain like `crop=...` keeps the real duration instead of collapsing the
+  stream to a few microseconds. The default filter chain is unaffected.
 
 ### Security
 
