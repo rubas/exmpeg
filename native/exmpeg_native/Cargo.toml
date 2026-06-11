@@ -2,14 +2,16 @@
 name = "exmpeg_native"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# rustler 0.38 raised its MSRV to 1.91; the crate cannot build on older
+# toolchains.
+rust-version = "1.91"
 
 [lib]
 name = "exmpeg_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = "0.37.4"
+rustler = "0.38.0"
 # rsmpeg 0.18 binds against FFmpeg 8.x. The crate links against the system
 # ffmpeg libraries via pkg-config; FFMPEG_PKG_CONFIG_PATH can override the
 # discovery path when building against a non-default install.
