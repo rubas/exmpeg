@@ -184,6 +184,14 @@ defmodule Exmpeg do
   Input source. Either a filesystem path (`String.t()`) or
   `{:memory, binary}` to read the entire input from an in-memory
   buffer through a custom AVIOContext.
+
+  For **untrusted** media (uploads, anything you did not author), use
+  `{:memory, binary}`: it is restricted to FFmpeg's `crypto,data`
+  protocols, so a crafted file cannot reach the network or any local
+  file. A path input necessarily allows the `file` protocol (to open the
+  path), which a crafted on-disk manifest can abuse to read sibling local
+  files - so do not write an untrusted upload to a temp file and probe it
+  by path. See the "Untrusted input" section of the README.
   """
   @type input_source :: Path.t() | {:memory, binary()}
 

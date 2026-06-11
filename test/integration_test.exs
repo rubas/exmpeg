@@ -619,6 +619,44 @@ defmodule Exmpeg.IntegrationTest do
     assert {:error, %Exmpeg.Error{reason: :invalid_request}} = Exmpeg.probe({:memory, <<>>})
   end
 
+  test "memory input cannot read a local file via a crafted manifest demuxer" do
+    # A DASH manifest whose only segment points at an on-disk media file.
+    # The DASH demuxer auto-probes raw bytes (no extension/MIME gate on a
+    # custom AVIO), so without a protocol whitelist FFmpeg would open the
+    # referenced file and probe its streams - local file disclosure driven
+    # by attacker-controlled input. With the whitelist pinned to
+    # `crypto,data`, the nested `file:` open is refused and the call fails
+    # instead of leaking the sentinel's streams.
+    sentinel =
+      Path.join(System.tmp_dir!(), "exmpeg_sentinel_#{System.unique_integer([:positive])}.mp4")
+
+    on_exit(fn -> File.rm(sentinel) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-y -f lavfi -i color=c=red:s=128x96:d=1 -c:v libx264 -pix_fmt yuv420p #{sentinel}),
+        stderr_to_stdout: true,
+        env: %{}
+      )
+
+    mpd = """
+    <?xml version="1.0"?>
+    <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT1S" minBufferTime="PT1S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
+      <Period>
+        <AdaptationSet mimeType="video/mp4" segmentAlignment="true">
+          <Representation id="1" bandwidth="100000" codecs="avc1.42c01e" width="128" height="96">
+            <BaseURL>file://#{sentinel}</BaseURL>
+            <SegmentBase indexRange="0-9999"><Initialization range="0-9999"/></SegmentBase>
+          </Representation>
+        </AdaptationSet>
+      </Period>
+    </MPD>
+    """
+
+    assert {:error, %Exmpeg.Error{}} = Exmpeg.probe({:memory, mpd})
+  end
+
   test "extract_frame works from a {:memory, binary} source", %{clip: clip} do
     bytes = File.read!(clip)
     out = Path.join(System.tmp_dir!(), "exmpeg_memframe_#{System.unique_integer([:positive])}.jpg")
