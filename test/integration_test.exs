@@ -215,6 +215,37 @@ defmodule Exmpeg.IntegrationTest do
     assert stats.streams_reencoded >= 1
   end
 
+  test "transcode normalises a nonzero source start to a zero origin" do
+    # A source whose streams start at ~1.4 s (MPEG-TS capture / edit-list
+    # offset). With a copy + re-encode mix the copied stream kept its 1.4 s
+    # offset while the re-encoded stream started at 0, a constant A/V
+    # desync. Normalising the output to a zero origin collapses the bogus
+    # offset: the ~2 s of media spans ~0..2 s instead of ~0..3.4 s.
+    src = Path.join(System.tmp_dir!(), "exmpeg_offset_#{System.unique_integer([:positive])}.ts")
+    out = Path.join(System.tmp_dir!(), "exmpeg_offset_out_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=160x120:r=10:d=2 -f lavfi -i sine=frequency=440:duration=2) ++
+          ~w(-c:v libx264 -c:a aac -output_ts_offset 1.4 -muxpreload 0 -muxdelay 0 #{src}),
+        env: %{}
+      )
+
+    # Sanity: the source really starts well after zero.
+    assert {:ok, %MediaInfo{format: %{start_time_s: src_start}}} = Exmpeg.probe(src)
+    assert src_start > 1.0
+
+    assert {:ok, _} = Exmpeg.transcode(src, out, video_codec: "copy", audio_codec: "aac")
+
+    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
+    # The output starts at zero and spans only the ~2 s of media; the
+    # pre-fix desync would push the container duration past 3 s.
+    assert format.duration_s < 2.5
+    assert format.start_time_s == nil or format.start_time_s < 0.1
+  end
+
   test "transcode mp4 -> webm with vp9 + opus", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_xc4_#{System.unique_integer([:positive])}.webm")
     on_exit(fn -> File.rm(out) end)

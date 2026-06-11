@@ -15,7 +15,7 @@ use std::path::Path;
 use rsmpeg::avcodec::{AVCodec, AVCodecContext, AVCodecRef};
 use rsmpeg::avfilter::{AVFilter, AVFilterGraph, AVFilterInOut};
 use rsmpeg::avformat::AVFormatContextOutput;
-use rsmpeg::avutil::{AVAudioFifo, AVChannelLayout, AVFrame};
+use rsmpeg::avutil::{AVAudioFifo, AVChannelLayout, AVFrame, av_rescale_q};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 use rsmpeg::swresample::SwrContext;
@@ -216,6 +216,15 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
     let mut progress =
         ProgressEmitter::from_av_duration(env, opts.progress, "transcode", input.duration);
 
+    // Re-encoded streams get zero-based timestamps (the audio sample
+    // counter and the video pts cursor both start at 0). Copied streams
+    // would otherwise keep their source timestamps, which for a source
+    // that does not start at 0 (MPEG-TS captures, edit-list offsets)
+    // leaves a constant A/V desync equal to the container start time.
+    // Normalise the whole output to a zero origin by subtracting the
+    // container start time from copied packets too.
+    let input_start_time = input.start_time;
+
     while let Some(packet) = input.read_packet()? {
         let idx = packet.stream_index as usize;
         let in_tb = input.streams()[idx].time_base;
@@ -232,6 +241,14 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
         match pipeline {
             StreamPipeline::Copy { out_idx, in_tb, .. } => {
                 let mut packet = packet;
+                if let Some(start) = start_offset_in_tb(input_start_time, *in_tb) {
+                    if packet.pts != ffi::AV_NOPTS_VALUE {
+                        packet.set_pts(packet.pts - start);
+                    }
+                    if packet.dts != ffi::AV_NOPTS_VALUE {
+                        packet.set_dts(packet.dts - start);
+                    }
+                }
                 packet.rescale_ts(*in_tb, out_time_bases[*out_idx as usize]);
                 packet.set_stream_index(*out_idx);
                 output.interleaved_write_frame(&mut packet)?;
@@ -985,6 +1002,21 @@ fn to_cstring(path: &Path) -> Result<CString, NativeError> {
         NativeError::new("invalid_request", "path contains NUL bytes")
             .with_detail("path", path.display().to_string())
     })
+}
+
+/// The container start time, rescaled from `AV_TIME_BASE` units into a
+/// stream's time_base, to subtract from copied packets. `None` when the
+/// source already starts at zero or carries no start time, so the common
+/// case adds no work and no shift.
+fn start_offset_in_tb(start_time: i64, stream_tb: ffi::AVRational) -> Option<i64> {
+    if start_time == ffi::AV_NOPTS_VALUE || start_time <= 0 {
+        return None;
+    }
+    let time_base_q = ffi::AVRational {
+        num: 1,
+        den: ffi::AV_TIME_BASE as i32,
+    };
+    Some(av_rescale_q(start_time, time_base_q, stream_tb))
 }
 
 fn drop_codec_type(

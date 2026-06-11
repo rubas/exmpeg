@@ -35,6 +35,12 @@
   packets are now rescaled into the muxer's chosen stream time_base
   before writing (previously a 16 kHz extraction reported ~3x short).
   WAV/MP3/M4A/FLAC are unaffected (the rescale is an identity there).
+- `transcode/3` with a mix of copied and re-encoded streams no longer
+  desyncs them when the source does not start at timestamp 0 (MPEG-TS
+  captures, edit-list offsets). Re-encoded streams use zero-based
+  counters; copied packets now have the container start time subtracted
+  too, so both share a zero origin while keeping their true inter-stream
+  offset.
 ## 0.3.0 - 2026-05-20
 
 Initial public release. Native Elixir bindings for FFmpeg 8 via the
