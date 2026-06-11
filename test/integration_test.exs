@@ -657,6 +657,29 @@ defmodule Exmpeg.IntegrationTest do
     assert {:error, %Exmpeg.Error{}} = Exmpeg.probe({:memory, mpd})
   end
 
+  test "a loaded buffer is reusable across operations", %{clip: clip} do
+    out = Path.join(System.tmp_dir!(), "exmpeg_buf_#{System.unique_integer([:positive])}.opus")
+    cat = Path.join(System.tmp_dir!(), "exmpeg_bufcat_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> File.rm(out) end)
+    on_exit(fn -> File.rm(cat) end)
+
+    bytes = File.read!(clip)
+    assert {:ok, %Exmpeg.Buffer{byte_size: size} = buf} = Exmpeg.load_buffer(bytes)
+    assert size == byte_size(bytes)
+
+    # The same buffer feeds several operations without re-copying.
+    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(buf)
+    assert format.nb_streams == 2
+
+    assert {:ok, audio} = Exmpeg.extract_audio(buf, out, sample_rate: 16_000)
+    assert audio.codec == "libopus"
+
+    assert {:ok, concat} = Exmpeg.concat([buf, buf], cat)
+    assert concat.inputs_joined == 2
+    assert {:ok, %MediaInfo{format: cat_format}} = Exmpeg.probe(cat)
+    assert cat_format.duration_s > 3.5
+  end
+
   test "extract_frame works from a {:memory, binary} source", %{clip: clip} do
     bytes = File.read!(clip)
     out = Path.join(System.tmp_dir!(), "exmpeg_memframe_#{System.unique_integer([:positive])}.jpg")

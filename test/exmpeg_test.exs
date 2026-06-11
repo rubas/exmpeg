@@ -3,7 +3,22 @@ defmodule ExmpegTest do
 
   use ExUnit.Case, async: true
 
-  alias Exmpeg.Error
+  alias Exmpeg.{Buffer, Error}
+
+  describe "load_buffer/1" do
+    test "loads a binary into a reusable Exmpeg.Buffer" do
+      assert {:ok, %Buffer{ref: ref, byte_size: 5}} = Exmpeg.load_buffer("hello")
+      assert is_reference(ref)
+    end
+
+    test "rejects an empty binary" do
+      assert {:error, %Error{reason: :invalid_request}} = Exmpeg.load_buffer(<<>>)
+    end
+
+    test "rejects a non-binary argument" do
+      assert {:error, %Error{reason: :invalid_request}} = Exmpeg.load_buffer(42)
+    end
+  end
 
   describe "probe/1" do
     test "rejects a non-string path" do

@@ -53,7 +53,7 @@ defmodule Exmpeg do
   (it is never renamed onto the destination); sweep those if needed.
   """
 
-  alias Exmpeg.{Error, MediaInfo, Native, Stream}
+  alias Exmpeg.{Buffer, Error, MediaInfo, Native, Stream}
 
   @typedoc "Options accepted by `remux/3`."
   @type remux_opt ::
@@ -174,6 +174,32 @@ defmodule Exmpeg do
   end
 
   @doc """
+  Loads `binary` into a reusable `Exmpeg.Buffer` for in-memory input.
+
+  The bytes are copied once into a refcounted native resource. Passing
+  the returned buffer to several operations (e.g. `probe/1` then
+  `transcode/3`, or as repeated `concat/3` inputs) reuses that one copy
+  instead of re-copying the binary on every call, which `{:memory, _}`
+  does. Prefer this over `{:memory, _}` when the same bytes feed more
+  than one call.
+
+      {:ok, buf} = Exmpeg.load_buffer(File.read!("clip.mp4"))
+      {:ok, info} = Exmpeg.probe(buf)
+      {:ok, _} = Exmpeg.extract_audio(buf, "out.opus")
+  """
+  @spec load_buffer(binary()) :: {:ok, Buffer.t()} | {:error, Error.t()}
+  def load_buffer(binary) when is_binary(binary) do
+    case Native.load_buffer(binary) do
+      {:ok, ref} -> {:ok, %Buffer{ref: ref, byte_size: byte_size(binary)}}
+      {:error, payload} -> {:error, Error.from_native(payload)}
+    end
+  end
+
+  def load_buffer(_other) do
+    {:error, Error.new(:invalid_request, "load_buffer/1 expects a binary")}
+  end
+
+  @doc """
   Probes `path` and returns container / stream metadata.
 
   Reads the file with `avformat_open_input` + `avformat_find_stream_info`,
@@ -181,24 +207,32 @@ defmodule Exmpeg do
   the file extension suggests.
   """
   @typedoc """
-  Input source. Either a filesystem path (`String.t()`) or
-  `{:memory, binary}` to read the entire input from an in-memory
-  buffer through a custom AVIOContext.
+  Input source, accepted by every read-side operation:
+
+  - a filesystem path (`String.t()`);
+  - `{:memory, binary}` to read the input from an in-memory binary
+    through a custom AVIOContext - the binary is copied into the NIF on
+    every call, so prefer a path or a buffer for large or reused media;
+  - an `Exmpeg.Buffer` from `load_buffer/1`, which copies the bytes once
+    and is reused across calls without re-copying.
 
   For **untrusted** media (uploads, anything you did not author), use
-  `{:memory, binary}`: it is restricted to FFmpeg's `crypto,data`
-  protocols, so a crafted file cannot reach the network or any local
-  file. A path input necessarily allows the `file` protocol (to open the
-  path), which a crafted on-disk manifest can abuse to read sibling local
-  files - so do not write an untrusted upload to a temp file and probe it
-  by path. See the "Untrusted input" section of the README.
+  `{:memory, binary}` or `load_buffer/1`: both are restricted to FFmpeg's
+  `crypto,data` protocols, so a crafted file cannot reach the network or
+  any local file. A path input necessarily allows the `file` protocol (to
+  open the path), which a crafted on-disk manifest can abuse to read
+  sibling local files - so do not write an untrusted upload to a temp
+  file and probe it by path. See the "Untrusted input" section of the
+  README.
   """
-  @type input_source :: Path.t() | {:memory, binary()}
+  @type input_source :: Path.t() | {:memory, binary()} | Buffer.t()
 
   @spec probe(input_source()) :: {:ok, MediaInfo.t()} | {:error, Error.t()}
   def probe(source) do
+    native = native_source(source)
+
     with :ok <- validate_input(source, :input),
-         {:ok, payload} <- native_call(Native.probe(source)) do
+         {:ok, payload} <- native_call(Native.probe(native)) do
       {:ok, build_media_info(payload)}
     end
   end
@@ -233,7 +267,8 @@ defmodule Exmpeg do
     with :ok <- validate_input(input, :input),
          :ok <- validate_non_empty_string(output, :output),
          :ok <- validate_options(opts, remux_validators()) do
-      native_call(Native.remux(input, output, build_remux_opts(opts)))
+      native = native_source(input)
+      native_call(Native.remux(native, output, build_remux_opts(opts)))
     end
   end
 
@@ -276,7 +311,8 @@ defmodule Exmpeg do
     with :ok <- validate_input(input, :input),
          :ok <- validate_non_empty_string(output, :output),
          :ok <- validate_options(opts, extract_frame_validators()) do
-      native_call(Native.extract_frame(input, output, build_extract_frame_opts(opts)))
+      native = native_source(input)
+      native_call(Native.extract_frame(native, output, build_extract_frame_opts(opts)))
     end
   end
 
@@ -329,7 +365,8 @@ defmodule Exmpeg do
     with :ok <- validate_input(input, :input),
          :ok <- validate_non_empty_string(output, :output),
          :ok <- validate_options(opts, extract_audio_validators()) do
-      native_call(Native.extract_audio(input, output, build_extract_audio_opts(opts)))
+      native = native_source(input)
+      native_call(Native.extract_audio(native, output, build_extract_audio_opts(opts)))
     end
   end
 
@@ -362,7 +399,8 @@ defmodule Exmpeg do
     with :ok <- validate_non_empty_string(output, :output),
          :ok <- validate_concat_inputs(inputs),
          :ok <- validate_options(opts, concat_validators()) do
-      native_call(Native.concat(inputs, output, build_concat_opts(opts)))
+      sources = Enum.map(inputs, &native_source/1)
+      native_call(Native.concat(sources, output, build_concat_opts(opts)))
     end
   end
 
@@ -412,7 +450,8 @@ defmodule Exmpeg do
     with :ok <- validate_input(input, :input),
          :ok <- validate_non_empty_string(output, :output),
          :ok <- validate_options(opts, transcode_validators()) do
-      native_call(Native.transcode(input, output, build_transcode_opts(opts)))
+      native = native_source(input)
+      native_call(Native.transcode(native, output, build_transcode_opts(opts)))
     end
   end
 
@@ -574,6 +613,8 @@ defmodule Exmpeg do
   @spec validate_input(any(), atom()) :: :ok | {:error, Error.t()}
   defp validate_input(path, name) when is_binary(path), do: validate_non_empty_string(path, name)
 
+  defp validate_input(%Buffer{ref: ref}, _name) when is_reference(ref), do: :ok
+
   defp validate_input({:memory, bytes}, name) when is_binary(bytes) do
     if byte_size(bytes) == 0 do
       {:error, Error.new(:invalid_request, "#{name} {:memory, _} binary is empty")}
@@ -586,9 +627,15 @@ defmodule Exmpeg do
     {:error,
      Error.new(
        :invalid_request,
-       "#{name} must be a path string or {:memory, binary}"
+       "#{name} must be a path string, {:memory, binary}, or an Exmpeg.Buffer"
      )}
   end
+
+  # Unwrap the public input source into what the NIF decodes: a buffer
+  # becomes its underlying resource reference; paths and {:memory, _}
+  # pass through unchanged.
+  defp native_source(%Buffer{ref: ref}), do: ref
+  defp native_source(other), do: other
 
   defp remux_validators do
     %{
