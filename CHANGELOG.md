@@ -84,6 +84,12 @@
   before any work, closing a write-side SSRF where libavformat would open
   a network write from a caller-controlled destination. Local paths
   (including Windows drive letters) are unaffected.
+- Every input is now opened with FFmpeg's `protocol_whitelist` pinned.
+  `{:memory, binary}` inputs are restricted to `crypto,data` (no
+  filesystem, no network) and filesystem-path inputs to
+  `file,crypto,data`. This closes an SSRF / local-file-disclosure vector
+  where a crafted manifest demuxer (HLS, DASH, `concat`) could drive
+  libavformat into opening attacker-controlled URLs from untrusted media.
 
 ### Performance
 

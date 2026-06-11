@@ -5,13 +5,13 @@
 //! callbacks operating on a `Vec<u8>` that lives for the lifetime of
 //! the format context.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rsmpeg::avformat::{AVFormatContextInput, AVIOContextContainer, AVIOContextCustom};
-use rsmpeg::avutil::AVMem;
+use rsmpeg::avutil::{AVDictionary, AVMem};
 use rsmpeg::ffi;
 use rustler::types::tuple::get_tuple;
 use rustler::{Binary, Decoder, Env, NifResult, Term};
@@ -84,6 +84,31 @@ impl<'a> Decoder<'a> for InputSource {
     }
 }
 
+// FFmpeg's `protocol_whitelist` gates every protocol open libavformat
+// performs, including the nested opens that container-of-references
+// demuxers (HLS, DASH, the `concat` protocol, sidecar segments) trigger
+// from inside attacker-controlled media. Without it, a crafted input can
+// drive FFmpeg into opening `http://169.254.169.254/...` (SSRF) or a
+// local file it picks. We pin the whitelist on every input so untrusted
+// media can never reach the network or an unexpected file.
+//
+// Normal single-file demuxers (mp4, mkv, ...) perform no nested opens, so
+// the whitelist is invisible to them; it only constrains the reference
+// demuxers, which is exactly the intent.
+
+// File inputs: the top-level open uses the `file` protocol, and a local
+// HLS/DASH playlist may legitimately reference sibling segment files, so
+// `file` stays in the set. `crypto` and `data` cover encrypted segments
+// and inline `data:` URIs. Network protocols are excluded. This matches
+// the default the `file:` protocol already implies; pinning it makes the
+// guarantee explicit and immune to FFmpeg default changes.
+const FILE_PROTOCOL_WHITELIST: &CStr = c"file,crypto,data";
+
+// Memory inputs are documented for buffering an entire untrusted upload.
+// Such input never legitimately needs to reach the filesystem or network,
+// so the whitelist excludes `file` as well, leaving only `crypto,data`.
+const MEMORY_PROTOCOL_WHITELIST: &CStr = c"crypto,data";
+
 fn open_path(path: &str) -> Result<AVFormatContextInput, NativeError> {
     let p = Path::new(path);
     if !p.is_file() {
@@ -96,7 +121,16 @@ fn open_path(path: &str) -> Result<AVFormatContextInput, NativeError> {
         NativeError::new("invalid_request", "input path contains NUL bytes")
             .with_detail("path", path.to_owned())
     })?;
-    AVFormatContextInput::open(&url).map_err(NativeError::from)
+    let mut options = Some(AVDictionary::new(
+        c"protocol_whitelist",
+        FILE_PROTOCOL_WHITELIST,
+        0,
+    ));
+    AVFormatContextInput::builder()
+        .url(&url)
+        .options(&mut options)
+        .open()
+        .map_err(NativeError::from)
 }
 
 fn open_memory(bytes: Vec<u8>) -> Result<AVFormatContextInput, NativeError> {
@@ -157,7 +191,15 @@ fn open_memory(bytes: Vec<u8>) -> Result<AVFormatContextInput, NativeError> {
         })),
     );
 
-    AVFormatContextInput::from_io_context(AVIOContextContainer::Custom(io))
+    let mut options = Some(AVDictionary::new(
+        c"protocol_whitelist",
+        MEMORY_PROTOCOL_WHITELIST,
+        0,
+    ));
+    AVFormatContextInput::builder()
+        .io_context(AVIOContextContainer::Custom(io))
+        .options(&mut options)
+        .open()
         .map_err(NativeError::from)
 }
 

@@ -79,6 +79,34 @@ Every NIF entry point is wrapped in `run_with_panic_protection`, so a
 Rust panic surfaces as `{:error, %{type: "nif_panic", ...}}` instead
 of taking down the BEAM VM.
 
+### Untrusted input
+
+Every input is opened with FFmpeg's `protocol_whitelist` pinned, so a
+crafted file cannot drive libavformat into opening attacker-controlled
+URLs (the SSRF / local-file-disclosure vector that HLS, DASH, and the
+`concat` protocol expose through nested segment opens). The guarantee
+differs by input kind:
+
+- **`{:memory, binary}` is the path for untrusted media.** It is
+  restricted to `crypto,data` - no filesystem and no network reach - so
+  a crafted upload can reach neither the network nor any local file.
+  Buffer untrusted uploads (and anything you did not author) through this
+  path.
+- **Filesystem-path inputs trust the local filesystem.** They allow
+  `file,crypto,data`: the network is blocked, but `file` is required - it
+  is the protocol that opens the path itself, and it also lets a local
+  HLS/DASH playlist read its sibling segment files. `protocol_whitelist`
+  applies uniformly to every open libavformat performs, so there is no
+  way to keep the top-level file open while forbidding the nested ones,
+  and a crafted *on-disk* manifest can therefore still point FFmpeg at
+  other local files via a `file:` reference. So do not write an untrusted
+  upload to a temp file and probe it by path - hand the bytes to
+  `{:memory, _}` instead.
+
+Single-file demuxers (mp4, mkv, ...) perform no nested opens, so the
+whitelist is invisible to them; it only constrains the reference
+demuxers, which is exactly where the risk lives.
+
 ## Installation
 
 ```elixir
