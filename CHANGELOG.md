@@ -9,6 +9,13 @@
   re-encoded. It now returns `{:error, %Exmpeg.Error{reason:
   :invalid_request}}` and requires an explicit `:channels` (1 or 2),
   matching `extract_audio/3`. Mono/stereo sources are unaffected.
+- Updated `rustler` to 0.38. Source builds (`EXMPEG_BUILD=1`) now require
+  Rust 1.91 or newer (rustler 0.38 raised its MSRV). Precompiled-NIF
+  consumers are unaffected.
+- Widened the `rustler_precompiled` requirement to `~> 0.9` (already
+  resolved to 0.9.0).
+- Bumped dev/test dependencies (`credo`, `ex_doc`, `ex_dna`, `ex_slop`)
+  and refreshed transitive Rust crate versions and GitHub Actions pins.
 
 ## 0.3.0 - 2026-05-20
 
