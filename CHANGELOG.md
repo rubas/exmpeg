@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-06-11
+
+### Added
+
+- `Exmpeg.load_buffer/1` returns an opaque, reusable `Exmpeg.Buffer` for
+  in-memory input. Unlike `{:memory, binary}`, which copies the whole
+  binary into the NIF on every call, a buffer copies the bytes once into
+  a refcounted native resource; passing it to later operations (or as
+  repeated `concat/3` inputs) is then a refcount bump, not another copy.
+  A buffer is accepted anywhere an input source is.
 
 ### Changed
 
@@ -16,6 +25,28 @@
   resolved to 0.9.0).
 - Bumped dev/test dependencies (`credo`, `ex_doc`, `ex_dna`, `ex_slop`)
   and refreshed transitive Rust crate versions and GitHub Actions pins.
+
+### Security
+
+- Output paths that look like a protocol URL (`http://`, `ftp://`,
+  `rtmp://`, `tcp://`, ...) are now rejected with `:invalid_request`
+  before any work, closing a write-side SSRF where libavformat would open
+  a network write from a caller-controlled destination. Local paths
+  (including Windows drive letters) are unaffected.
+- Every input is now opened with FFmpeg's `protocol_whitelist` pinned.
+  `{:memory, binary}` inputs are restricted to `crypto,data` (no
+  filesystem, no network) and filesystem-path inputs to
+  `file,crypto,data`. This closes an SSRF / local-file-disclosure vector
+  where a crafted manifest demuxer (HLS, DASH, `concat`) could drive
+  libavformat into opening attacker-controlled URLs from untrusted media.
+
+### Performance
+
+- `extract_audio/3` skips the resampler and the sample FIFO when the
+  decoded audio already matches the target format, rate, and channel
+  layout and the encoder accepts arbitrary chunk sizes (the PCM case),
+  sending each decoded frame straight to the encoder. Output is
+  unchanged; the conversion path is unaffected.
 
 ### Fixed
 
@@ -84,36 +115,6 @@
   dirty-scheduler job to completion. Adds the new `:cancelled` error
   reason.
 
-### Security
-
-- Output paths that look like a protocol URL (`http://`, `ftp://`,
-  `rtmp://`, `tcp://`, ...) are now rejected with `:invalid_request`
-  before any work, closing a write-side SSRF where libavformat would open
-  a network write from a caller-controlled destination. Local paths
-  (including Windows drive letters) are unaffected.
-- Every input is now opened with FFmpeg's `protocol_whitelist` pinned.
-  `{:memory, binary}` inputs are restricted to `crypto,data` (no
-  filesystem, no network) and filesystem-path inputs to
-  `file,crypto,data`. This closes an SSRF / local-file-disclosure vector
-  where a crafted manifest demuxer (HLS, DASH, `concat`) could drive
-  libavformat into opening attacker-controlled URLs from untrusted media.
-
-### Performance
-
-- `extract_audio/3` skips the resampler and the sample FIFO when the
-  decoded audio already matches the target format, rate, and channel
-  layout and the encoder accepts arbitrary chunk sizes (the PCM case),
-  sending each decoded frame straight to the encoder. Output is
-  unchanged; the conversion path is unaffected.
-
-### Added
-
-- `Exmpeg.load_buffer/1` returns an opaque, reusable `Exmpeg.Buffer` for
-  in-memory input. Unlike `{:memory, binary}`, which copies the whole
-  binary into the NIF on every call, a buffer copies the bytes once into
-  a refcounted native resource; passing it to later operations (or as
-  repeated `concat/3` inputs) is then a refcount bump, not another copy.
-  A buffer is accepted anywhere an input source is.
 ## 0.3.0 - 2026-05-20
 
 Initial public release. Native Elixir bindings for FFmpeg 8 via the
