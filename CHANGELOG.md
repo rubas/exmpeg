@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `transcode/3` no longer silently downmixes a surround (>2-channel)
+  source to stereo when `:channels` is omitted and the audio is
+  re-encoded. It now returns `{:error, %Exmpeg.Error{reason:
+  :invalid_request}}` and requires an explicit `:channels` (1 or 2),
+  matching `extract_audio/3`. Mono/stereo sources are unaffected.
+
 ## 0.3.0 - 2026-05-20
 
 Initial public release. Native Elixir bindings for FFmpeg 8 via the

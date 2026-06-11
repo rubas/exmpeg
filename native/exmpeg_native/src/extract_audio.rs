@@ -80,7 +80,8 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     decoder.open(None)?;
 
     let target_rate = pick_sample_rate(&encoder_codec, opts.sample_rate, decoder.sample_rate);
-    let target_channels = resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
+    let target_channels =
+        crate::audio::resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
     let target_layout = AVChannelLayout::from_nb_channels(target_channels);
     let target_fmt = pick_sample_fmt(&encoder_codec, decoder.sample_fmt);
 
@@ -405,33 +406,6 @@ fn compute_resample_capacity(src_nb_samples: i32, src_rate: i32, dst_rate: i32) 
     }
     let raw = i64::from(src_nb_samples) * i64::from(dst_rate.max(1)) / i64::from(src_rate.max(1));
     raw.saturating_add(256).clamp(1, MAX_NB_SAMPLES) as i32
-}
-
-fn resolve_channels(requested: Option<i32>, src: i32) -> Result<i32, NativeError> {
-    // When the caller hasn't asked for a specific layout we only carry
-    // mono / stereo sources through unchanged. A source with more
-    // channels (5.1, 7.1, ...) would otherwise be silently downmixed,
-    // which hides the layout change from downstream callers and
-    // violates the project's no-hidden-fallbacks rule. Force the
-    // caller to opt in to mono or stereo explicitly via `:channels`.
-    let target = if let Some(value) = requested {
-        value
-    } else if (1..=2).contains(&src) {
-        src
-    } else {
-        return Err(NativeError::new(
-            "invalid_request",
-            "source has more than 2 channels; pass `:channels` (1 or 2) to choose mono or stereo",
-        )
-        .with_detail("source_channels", src.to_string()));
-    };
-    if !(1..=2).contains(&target) {
-        return Err(
-            NativeError::new("invalid_request", "channels must be 1 (mono) or 2 (stereo)")
-                .with_detail("channels", target.to_string()),
-        );
-    }
-    Ok(target)
 }
 
 fn find_audio_stream(

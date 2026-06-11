@@ -189,6 +189,32 @@ defmodule Exmpeg.IntegrationTest do
     assert Enum.any?(streams, &(&1.kind == :audio and &1.codec == "aac"))
   end
 
+  test "transcode of a surround source requires an explicit :channels" do
+    # 5.1 source. Re-encoding the audio without :channels would silently
+    # downmix to stereo; instead it must return :invalid_request, matching
+    # extract_audio. An explicit value transcodes fine.
+    src = Path.join(System.tmp_dir!(), "exmpeg_surround_#{System.unique_integer([:positive])}.mp4")
+    out = Path.join(System.tmp_dir!(), "exmpeg_surround_out_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=64x48:d=1) ++
+          ["-f", "lavfi", "-i", "aevalsrc=0|0|0|0|0|0:c=5.1:d=1"] ++
+          ~w(-c:v libx264 -c:a aac -shortest #{src}),
+        env: %{}
+      )
+
+    assert {:error, %Exmpeg.Error{reason: :invalid_request, message: msg}} =
+             Exmpeg.transcode(src, out, audio_codec: "aac")
+
+    assert msg =~ "channels"
+
+    assert {:ok, stats} = Exmpeg.transcode(src, out, audio_codec: "aac", channels: 2)
+    assert stats.streams_reencoded >= 1
+  end
+
   test "transcode mp4 -> webm with vp9 + opus", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_xc4_#{System.unique_integer([:positive])}.webm")
     on_exit(fn -> File.rm(out) end)

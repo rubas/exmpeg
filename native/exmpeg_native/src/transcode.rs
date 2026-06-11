@@ -533,16 +533,11 @@ fn build_audio_pipeline(
     let mut encoder = AVCodecContext::new(&encoder_codec);
 
     let dst_rate = opts.sample_rate.unwrap_or(decoder.sample_rate).max(1);
-    let dst_channels = opts
-        .channels
-        .unwrap_or(decoder.ch_layout.nb_channels.clamp(1, 2));
-    if !(1..=2).contains(&dst_channels) {
-        return Err(NativeError::new(
-            "invalid_request",
-            "channels must be 1 (mono) or 2 (stereo) for transcode",
-        )
-        .with_detail("channels", dst_channels.to_string()));
-    }
+    // Share extract_audio's policy: an omitted `:channels` carries a
+    // mono/stereo source through, but a surround source (>2 channels)
+    // must opt in explicitly rather than be silently downmixed.
+    let dst_channels =
+        crate::audio::resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
     let dst_layout = AVChannelLayout::from_nb_channels(dst_channels);
     let dst_fmt = pick_sample_fmt(&encoder_codec, decoder.sample_fmt);
 

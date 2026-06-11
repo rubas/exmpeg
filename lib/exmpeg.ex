@@ -373,7 +373,11 @@ defmodule Exmpeg do
     to the nearest even value.
   - `:fps` - target framerate as `{num, den}`. Defaults to the source.
   - `:sample_rate` - target audio sample rate in Hz.
-  - `:channels` - `1` (mono) or `2` (stereo).
+  - `:channels` - `1` (mono) or `2` (stereo). A mono or stereo source is
+    carried through when omitted; a source with more than 2 channels
+    (5.1, 7.1, ...) requires an explicit value rather than being silently
+    downmixed, and returns `{:error, %Error{reason: :invalid_request}}`
+    otherwise. Applies only when the audio stream is re-encoded.
 
   ## Returns
 
