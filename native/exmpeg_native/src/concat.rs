@@ -12,7 +12,7 @@ use std::ffi::CString;
 use std::path::Path;
 
 use rsmpeg::avcodec::AVCodecParameters;
-use rsmpeg::avformat::{AVFormatContextInput, AVFormatContextOutput};
+use rsmpeg::avformat::{AVFormatContextInput, AVFormatContextOutput, AVOutputFormat};
 use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
@@ -52,6 +52,16 @@ pub(crate) fn concat<P: AsRef<Path>>(
     let total_inputs = sources.len();
     let output_path = output_path.as_ref();
     let out_url = to_cstring(output_path)?;
+
+    // No muxer matches the output extension: surface `unsupported` rather
+    // than the generic io_error `create` would otherwise produce.
+    if AVOutputFormat::guess_format(None, Some(&out_url), None).is_none() {
+        return Err(
+            NativeError::new("unsupported", "no muxer for the output extension")
+                .with_detail("output", output_path.display().to_string()),
+        );
+    }
+
     let mut output = AVFormatContextOutput::create(&out_url)?;
 
     let mut sources = sources.into_iter();
@@ -80,7 +90,9 @@ pub(crate) fn concat<P: AsRef<Path>>(
     let streams_copied = codec_ids.len() as u32;
 
     let mut header_opts = None;
-    output.write_header(&mut header_opts)?;
+    output
+        .write_header(&mut header_opts)
+        .map_err(crate::errors::classify_write_header_error)?;
 
     // Snapshot the muxer's chosen output time_base. Some muxers (notably
     // mp4) override what we requested at new_stream time; we rescale

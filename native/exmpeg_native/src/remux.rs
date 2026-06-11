@@ -7,7 +7,7 @@ use std::ffi::CString;
 use std::path::Path;
 
 use rsmpeg::avcodec::AVCodecParameters;
-use rsmpeg::avformat::AVFormatContextOutput;
+use rsmpeg::avformat::{AVFormatContextOutput, AVOutputFormat};
 use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
@@ -62,6 +62,17 @@ pub(crate) fn remux<Q: AsRef<Path>>(
     let out_url = to_cstring(output_path)?;
 
     let mut input = source.open()?;
+
+    // No muxer matches the output extension (e.g. `out.xyz`). Surface
+    // this as `unsupported` per the documented contract, before `create`
+    // would fail with a generic AVERROR(EINVAL) that maps to io_error.
+    if AVOutputFormat::guess_format(None, Some(&out_url), None).is_none() {
+        return Err(
+            NativeError::new("unsupported", "no muxer for the output extension")
+                .with_detail("output", output_path.display().to_string()),
+        );
+    }
+
     let mut output = AVFormatContextOutput::create(&out_url)?;
 
     let drop_audio = opts.drop_audio.unwrap_or(false);
@@ -112,7 +123,9 @@ pub(crate) fn remux<Q: AsRef<Path>>(
     }
 
     let mut header_opts = None;
-    output.write_header(&mut header_opts)?;
+    output
+        .write_header(&mut header_opts)
+        .map_err(crate::errors::classify_write_header_error)?;
 
     let start_s = opts.start_s.unwrap_or(0.0);
     let end_s = opts.duration_s.map(|d| start_s + d);

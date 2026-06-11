@@ -66,6 +66,10 @@
   left in place, so the following input no longer overlaps and trips the
   monotonic-dts ratchet (which flattened its real inter-frame gaps).
   `duration_s` now reports the summed input durations instead of `0.0`.
+- `remux/3` and `concat/3` now return `{:error, %Exmpeg.Error{reason:
+  :unsupported}}` for an unknown output extension or a codec the chosen
+  container cannot hold (e.g. h264 into `.wav`), matching the documented
+  contract, instead of the generic `:io_error` they returned before.
 
 ### Security
 
