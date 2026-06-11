@@ -49,6 +49,14 @@
   another's in-progress output. The guarantee is now
   last-complete-rename-wins: every observable destination state is a
   complete file.
+
+### Security
+
+- Output paths that look like a protocol URL (`http://`, `ftp://`,
+  `rtmp://`, `tcp://`, ...) are now rejected with `:invalid_request`
+  before any work, closing a write-side SSRF where libavformat would open
+  a network write from a caller-controlled destination. Local paths
+  (including Windows drive letters) are unaffected.
 ## 0.3.0 - 2026-05-20
 
 Initial public release. Native Elixir bindings for FFmpeg 8 via the

@@ -36,6 +36,15 @@ defmodule ExmpegTest do
       assert msg =~ "unknown option"
     end
 
+    test "rejects a URL output (write-side SSRF guard)" do
+      for url <- ["http://host/out.mp4", "ftp://host/out.mp4", "rtmp://host/live"] do
+        assert {:error, %Error{reason: :invalid_request, message: msg}} =
+                 Exmpeg.remux("/no/such/file.mp4", url)
+
+        assert msg =~ "local path"
+      end
+    end
+
     test "rejects negative start_s" do
       assert {:error, %Error{reason: :invalid_request, message: msg}} =
                Exmpeg.remux("in.mp4", "out.mp4", start_s: -1)
