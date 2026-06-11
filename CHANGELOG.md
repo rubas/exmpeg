@@ -70,6 +70,12 @@
   :unsupported}}` for an unknown output extension or a codec the chosen
   container cannot hold (e.g. h264 into `.wav`), matching the documented
   contract, instead of the generic `:io_error` they returned before.
+- `remux/3` with `:duration_s` no longer truncates other streams when one
+  stream reaches the window edge first. Each kept stream now ends
+  individually; the copy loop stops only once every kept stream has
+  passed the window (or the input hits EOF), so interleaved audio is not
+  cut short relative to video. Packets with no pts are bounded by their
+  dts instead of bypassing the window check.
 
 ### Security
 

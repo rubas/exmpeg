@@ -65,8 +65,45 @@ defmodule Exmpeg.IntegrationTest do
 
     assert {:ok, stats} = Exmpeg.remux(clip, out, start_s: 0.0, duration_s: 1.0)
     assert stats.packets_written > 0
-    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
+    assert {:ok, %MediaInfo{format: format, streams: streams}} = Exmpeg.probe(out)
     assert format.duration_s < 1.5
+
+    # Each kept stream ends on its own at the window edge; the audio is
+    # not truncated early because the video happened to reach the end
+    # first. Both land near the requested 1 s.
+    [video] = Enum.filter(streams, &(&1.kind == :video))
+    [audio] = Enum.filter(streams, &(&1.kind == :audio))
+    assert_in_delta video.duration_s, 1.0, 0.4
+    assert_in_delta audio.duration_s, 1.0, 0.4
+    assert_in_delta video.duration_s, audio.duration_s, 0.3
+  end
+
+  test "remux with duration_s cuts correctly when a stream ends before the window" do
+    # The audio track (1 s) ends well before the 2 s cut window, so it
+    # never crosses the boundary. The loop must still terminate and keep
+    # the full audio plus the cut video, rather than dropping audio or
+    # hanging on a never-completing stream.
+    src = Path.join(System.tmp_dir!(), "exmpeg_shortaud_#{System.unique_integer([:positive])}.mp4")
+    out = Path.join(System.tmp_dir!(), "exmpeg_shortaud_out_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=64x48:r=10:d=4) ++
+          ~w(-f lavfi -i sine=frequency=440:duration=1 -c:v libx264 -c:a aac #{src}),
+        env: %{}
+      )
+
+    assert {:ok, _stats} = Exmpeg.remux(src, out, duration_s: 2.0)
+
+    assert {:ok, %MediaInfo{format: format, streams: streams}} = Exmpeg.probe(out)
+    # Video is cut to ~2 s; the short audio is kept whole (~1 s).
+    assert_in_delta format.duration_s, 2.0, 0.4
+    [video] = Enum.filter(streams, &(&1.kind == :video))
+    [audio] = Enum.filter(streams, &(&1.kind == :audio))
+    assert_in_delta video.duration_s, 2.0, 0.4
+    assert_in_delta audio.duration_s, 1.0, 0.4
   end
 
   test "remux to an unknown output extension returns :unsupported", %{clip: clip} do

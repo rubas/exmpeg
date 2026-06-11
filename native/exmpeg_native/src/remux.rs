@@ -16,6 +16,13 @@ use crate::errors::NativeError;
 use crate::ffi_helpers;
 use crate::progress::ProgressEmitter;
 
+/// How far past the `:duration_s` window the copy loop keeps reading
+/// before giving up on streams that never crossed it (a stream that ended
+/// early). Generous relative to real interleaving lag (well under a
+/// second), so a lagging stream's in-window packets are never dropped,
+/// while a bounded cut stays bounded instead of scanning to EOF.
+const WINDOW_SLACK_S: f64 = 10.0;
+
 /// Caller-supplied options for `remux`.
 #[derive(Default, NifMap)]
 pub(crate) struct RemuxOpts {
@@ -83,15 +90,19 @@ pub(crate) fn remux<Q: AsRef<Path>>(
     // None when filtered out. Packets from a `None` slot are dropped at
     // read time.
     let mut stream_map: Vec<Option<i32>> = Vec::with_capacity(input.streams().len());
+    // Whether each output stream's window completion gates the
+    // `:duration_s` copy loop, indexed by output stream index. Only
+    // audio/video have a continuous timestamped cadence that reliably
+    // crosses the cut; subtitle/data/attachment streams are sparse or
+    // carry no pts, so they would never flip `done` and would force the
+    // loop to read to EOF. They do not gate termination (their in-window
+    // packets are still written).
+    let mut window_gated: Vec<bool> = Vec::new();
 
     for in_stream in input.streams() {
         let in_codecpar = in_stream.codecpar();
-        if should_drop(
-            in_codecpar.codec_type,
-            drop_audio,
-            drop_video,
-            drop_subtitles,
-        ) {
+        let codec_type = in_codecpar.codec_type;
+        if should_drop(codec_type, drop_audio, drop_video, drop_subtitles) {
             stream_map.push(None);
             continue;
         }
@@ -108,6 +119,8 @@ pub(crate) fn remux<Q: AsRef<Path>>(
         out_stream.set_time_base(in_stream.time_base);
 
         stream_map.push(Some(out_stream.index));
+        window_gated
+            .push(codec_type == ffi::AVMEDIA_TYPE_AUDIO || codec_type == ffi::AVMEDIA_TYPE_VIDEO);
     }
 
     let streams_copied = stream_map.iter().filter(|s| s.is_some()).count() as u32;
@@ -135,6 +148,14 @@ pub(crate) fn remux<Q: AsRef<Path>>(
     // Largest pts (in seconds) of any packet actually written, so the
     // closing tick reports the real end position rather than 0.0.
     let mut last_written_pts_s = 0.0;
+    // Per output-stream end-of-window flag. With `:duration_s`, a gated
+    // (audio/video) stream ends individually when its first packet passes
+    // the window; the loop only stops once every gated stream is done (or
+    // the input hits EOF), so an interleaved stream that lags (B-frame
+    // video can run ahead of audio) is not truncated by another reaching
+    // the end first. Non-gated streams start `done` so they neither block
+    // termination nor cause the loop to read to EOF.
+    let mut done: Vec<bool> = window_gated.iter().map(|&gated| !gated).collect();
     let mut progress =
         ProgressEmitter::from_av_duration(env, opts.progress, "remux", input.duration);
 
@@ -153,18 +174,40 @@ pub(crate) fn remux<Q: AsRef<Path>>(
         } else {
             Some(packet.pts as f64 * f64::from(tb.num) / f64::from(tb.den))
         };
+        // Fall back to dts for the window check so a packet with no pts
+        // is still bounded by the window rather than always written.
+        let window_ts = pts_s.or_else(|| {
+            if packet.dts == ffi::AV_NOPTS_VALUE {
+                None
+            } else {
+                Some(packet.dts as f64 * f64::from(tb.num) / f64::from(tb.den))
+            }
+        });
 
-        if let Some(pts) = pts_s {
-            if pts < start_s {
+        if let Some(ts) = window_ts {
+            if ts < start_s {
                 packets_dropped += 1;
                 continue;
             }
-            match end_s {
-                Some(end) if pts >= end => {
+            if let Some(end) = end_s {
+                if ts >= end {
                     packets_dropped += 1;
-                    break;
+                    if window_gated[out_index as usize] {
+                        done[out_index as usize] = true;
+                    }
+                    // Stop once every gated stream has crossed the window,
+                    // or once we are well past it. The slack guards the
+                    // case the per-stream flags cannot: a gated stream
+                    // that ends *before* the window (a short audio track,
+                    // for example) never crosses, so without this a
+                    // bounded cut would keep reading to EOF. Interleaving
+                    // lag in a sane file is well under this slack, so no
+                    // in-window packet of a lagging stream is dropped.
+                    if done.iter().all(|&d| d) || ts >= end + WINDOW_SLACK_S {
+                        break;
+                    }
+                    continue;
                 }
-                _ => {}
             }
         }
 
