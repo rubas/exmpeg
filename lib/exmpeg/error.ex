@@ -10,6 +10,7 @@ defmodule Exmpeg.Error do
   - `:encode_error`    - the encoder rejected a frame or could not drain a packet.
   - `:unsupported`     - the build of FFmpeg this NIF is linked against has no muxer / demuxer / codec for the request.
   - `:runtime_error`   - internal NIF runtime fault (e.g. unexpected ffmpeg state).
+  - `:cancelled`       - the calling process exited before the operation finished; the partial output was removed.
   - `:nif_panic`       - the Rust side panicked; should never happen in practice.
   - `:native_error`    - fallback for unrecognised native error types.
   """
@@ -21,6 +22,7 @@ defmodule Exmpeg.Error do
           | :encode_error
           | :unsupported
           | :runtime_error
+          | :cancelled
           | :nif_panic
           | :native_error
 
@@ -52,6 +54,7 @@ defmodule Exmpeg.Error do
   defp to_reason("encode_error"), do: :encode_error
   defp to_reason("unsupported"), do: :unsupported
   defp to_reason("runtime_error"), do: :runtime_error
+  defp to_reason("cancelled"), do: :cancelled
   defp to_reason("nif_panic"), do: :nif_panic
   defp to_reason(_), do: :native_error
 

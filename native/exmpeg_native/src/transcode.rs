@@ -22,6 +22,7 @@ use rsmpeg::swresample::SwrContext;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
 use crate::progress::ProgressEmitter;
@@ -236,6 +237,7 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
     let mut packets_written: u64 = 0;
     let mut progress =
         ProgressEmitter::from_av_duration(env, opts.progress, "transcode", input.duration);
+    let mut cancel = CancelGuard::new(env);
 
     // Re-encoded streams get zero-based timestamps (the audio sample
     // counter and the video pts cursor both start at 0). Copied streams
@@ -247,6 +249,7 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
     let input_start_time = input.start_time;
 
     while let Some(packet) = input.read_packet()? {
+        cancel.check()?;
         let idx = packet.stream_index as usize;
         let in_tb = input.streams()[idx].time_base;
         let pts_s = if packet.pts == ffi::AV_NOPTS_VALUE {
@@ -298,8 +301,12 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
         progress.tick(packets_written, pts_s);
     }
 
-    // Drain every re-encoded stream.
+    // Drain every re-encoded stream. Encoders/filters with buffered
+    // output can flush many frames here, so keep checking the caller:
+    // without this a caller that exits right after EOF would still see
+    // the transcode run to completion and rename the final output.
     for pipeline in &mut pipelines {
+        cancel.check()?;
         match pipeline {
             StreamPipeline::Video { .. } => {
                 process_video_packet(
@@ -323,6 +330,7 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
         }
     }
 
+    cancel.check()?;
     output.write_trailer()?;
 
     let duration_s = if input.duration > 0 {

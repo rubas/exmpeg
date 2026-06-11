@@ -12,6 +12,7 @@ use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
 use crate::progress::ProgressEmitter;
@@ -159,8 +160,10 @@ pub(crate) fn remux<Q: AsRef<Path>>(
     let mut done: Vec<bool> = window_gated.iter().map(|&gated| !gated).collect();
     let mut progress =
         ProgressEmitter::from_av_duration(env, opts.progress, "remux", input.duration);
+    let mut cancel = CancelGuard::new(env);
 
     while let Some(mut packet) = input.read_packet()? {
+        cancel.check()?;
         let in_index = packet.stream_index as usize;
         let Some(out_index) = stream_map.get(in_index).copied().flatten() else {
             // Stream was filtered out via drop_audio/video/subtitles.

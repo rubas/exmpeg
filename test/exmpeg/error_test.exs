@@ -20,6 +20,7 @@ defmodule Exmpeg.ErrorTest do
           {"encode_error", :encode_error},
           {"unsupported", :unsupported},
           {"runtime_error", :runtime_error},
+          {"cancelled", :cancelled},
           {"nif_panic", :nif_panic}
         ] do
       err = Error.from_native(%{type: type, message: "x", details: %{"k" => "v"}})

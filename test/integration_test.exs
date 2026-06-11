@@ -806,6 +806,51 @@ defmodule Exmpeg.IntegrationTest do
     path
   end
 
+  test "killing the caller mid-transcode cancels the NIF and removes the partial" do
+    # A long, high-resolution source so the encode is unmistakably still
+    # running when we kill the calling process - small clips finish before
+    # a kill can land.
+    src = Path.join(System.tmp_dir!(), "exmpeg_cancel_src_#{System.unique_integer([:positive])}.mp4")
+    out = Path.join(System.tmp_dir!(), "exmpeg_cancel_out_#{System.unique_integer([:positive])}.mp4")
+
+    on_exit(fn ->
+      File.rm(src)
+      File.rm(out)
+      out |> partials_for() |> Enum.each(&File.rm/1)
+    end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-y -f lavfi -i testsrc2=s=1280x720:r=30:d=60 -c:v libx264 -preset ultrafast -pix_fmt yuv420p #{src}),
+        stderr_to_stdout: true,
+        env: %{}
+      )
+
+    parent = self()
+
+    # Unlinked spawn: a linked Task would propagate the :kill exit to the
+    # test process. We only need the pid to kill, not the result.
+    pid =
+      spawn(fn ->
+        send(parent, {:started, self()})
+        Exmpeg.transcode(src, out, video_codec: "libx264", width: 1280)
+      end)
+
+    assert_receive {:started, ^pid}, 5_000
+
+    # Wait until the muxer has actually opened the partial file, i.e. the
+    # encode loop is running, before pulling the rug out.
+    assert eventually(fn -> partials_for(out) != [] end, 10_000)
+
+    Process.exit(pid, :kill)
+
+    # Within ~100 ms the NIF observes the dead caller, returns the
+    # `cancelled` error, and atomic_output removes the partial. No final
+    # output is ever produced.
+    assert eventually(fn -> partials_for(out) == [] and not File.exists?(out) end, 10_000)
+  end
+
   defp drain_progress(acc) do
     receive do
       {:exmpeg_progress, msg} -> drain_progress([msg | acc])
@@ -814,10 +859,24 @@ defmodule Exmpeg.IntegrationTest do
     end
   end
 
-  # All `<stem>.partial*` siblings of an output path. The partial name
-  # carries a per-call nonce, so glob the infix rather than predict it.
+  # All `<stem>.partial*` siblings of an output path. Globbing the infix
+  # keeps the assertion stable regardless of the exact partial-name shape.
   defp partials_for(out) do
     root = Path.rootname(out)
     Path.wildcard(root <> ".partial*")
+  end
+
+  defp eventually(fun, timeout_ms, waited_ms \\ 0) do
+    cond do
+      fun.() ->
+        true
+
+      waited_ms >= timeout_ms ->
+        false
+
+      true ->
+        Process.sleep(50)
+        eventually(fun, timeout_ms, waited_ms + 50)
+    end
   end
 end

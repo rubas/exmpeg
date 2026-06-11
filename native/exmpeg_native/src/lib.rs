@@ -11,6 +11,7 @@ use rustler::{Binary, Encoder, Env, ResourceArc, Term};
 
 mod atomic_output;
 mod audio;
+mod cancel;
 mod concat;
 mod errors;
 mod extract_audio;
@@ -122,7 +123,7 @@ fn nif_extract_frame(
 ) -> Term<'_> {
     let result = run_with_panic_protection(|| {
         atomic_output::run(&output, |partial| {
-            extract_frame::extract_frame(source, partial, &opts)
+            extract_frame::extract_frame(env, source, partial, &opts)
         })
     });
     encode_result(env, result)

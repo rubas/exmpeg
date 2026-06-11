@@ -17,6 +17,7 @@ use rsmpeg::swresample::SwrContext;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
 use crate::progress::ProgressEmitter;
@@ -167,8 +168,10 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     let mut samples_written: u64 = 0;
     let mut progress =
         ProgressEmitter::from_av_duration(env, opts.progress, "extract_audio", input.duration);
+    let mut cancel = CancelGuard::new(env);
 
     while let Some(packet) = input.read_packet()? {
+        cancel.check()?;
         if packet.stream_index as usize != audio_index {
             continue;
         }
@@ -232,6 +235,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     // side produced truncated output.
     decoder.send_packet(None)?;
     loop {
+        cancel.check()?;
         let frame = match decoder.receive_frame() {
             Ok(f) => f,
             Err(RsmpegError::DecoderDrainError | RsmpegError::DecoderFlushedError) => break,

@@ -76,6 +76,13 @@
   passed the window (or the input hits EOF), so interleaved audio is not
   cut short relative to video. Packets with no pts are bounded by their
   dts instead of bypassing the window check.
+- Long-running operations (`remux/3`, `extract_frame/3`,
+  `extract_audio/3`, `concat/3`, `transcode/3`) now stop when the calling
+  process dies. They check caller liveness on a ~100 ms throttle and, on
+  a dead caller, remove the partial output and return
+  `{:error, %Exmpeg.Error{reason: :cancelled}}` instead of running the
+  dirty-scheduler job to completion. Adds the new `:cancelled` error
+  reason.
 
 ### Security
 
