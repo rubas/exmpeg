@@ -59,9 +59,18 @@ jobs:
         # ecosystems. The NIF crate carries the native surface; RustSec
         # advisories against its Rust dependency tree must fail this workflow
         # too.
+        #
+        # `--deny unmaintained` makes plain `cargo audit` (which only warns
+        # on unmaintained crates) fail the run, so a newly-unmaintained
+        # dependency is caught. RUSTSEC-2024-0436 (`paste`) is the one known
+        # exception: it is a compile-time-only proc-macro pulled in
+        # transitively by the pinned rsmpeg revision, contributing no runtime
+        # code, so it is maintenance risk rather than an exploitable
+        # vulnerability. Tracked until rsmpeg drops `paste` (or moves to the
+        # maintained `pastey` fork), picked up at the next rsmpeg bump.
         if: ${{ !cancelled() }}
         working-directory: native/exmpeg_native
-        run: cargo audit
+        run: cargo audit --deny unmaintained --ignore RUSTSEC-2024-0436
 
       - name: Report audit failure
         if: failure()
