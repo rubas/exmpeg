@@ -161,10 +161,10 @@ pub(crate) fn remux<Q: AsRef<Path>>(
 
         output.interleaved_write_frame(&mut packet)?;
         packets_written += 1;
-        if let Some(pts) = pts_s {
-            if pts > last_written_pts_s {
-                last_written_pts_s = pts;
-            }
+        if let Some(pts) = pts_s
+            && pts > last_written_pts_s
+        {
+            last_written_pts_s = pts;
         }
         progress.tick(packets_written, pts_s.unwrap_or(0.0));
     }
