@@ -44,6 +44,20 @@ pub(crate) fn run<T, F>(final_path: &str, body: F) -> Result<T, NativeError>
 where
     F: FnOnce(&Path) -> Result<T, NativeError>,
 {
+    // The output string is handed to libavformat, which selects its AVIO
+    // write protocol from the scheme: an output of `ftp://`, `http://`,
+    // `rtmp://`, `tcp://`, or a nested wrapper like `tee:http://...`
+    // would make the muxer open a network write (write-side SSRF) before
+    // the local rename. The atomic-rename design assumes a local path, so
+    // reject any protocol scheme at this single chokepoint that every
+    // output-producing op funnels through.
+    if has_url_scheme(final_path) {
+        return Err(
+            NativeError::new("invalid_request", "output must be a local path, not a URL")
+                .with_detail("output", final_path.to_owned()),
+        );
+    }
+
     let final_path = PathBuf::from(final_path);
     let partial = partial_path_for(&final_path, &partial_nonce());
 
@@ -130,6 +144,33 @@ fn partial_nonce() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     format!("{base:016x}.{}.{seq}.{nanos}", std::process::id())
+}
+
+/// Whether `s` carries an FFmpeg protocol scheme that would make the
+/// muxer open a non-local destination.
+///
+/// libavformat selects the AVIO protocol from the prefix before the
+/// first `:` (when that `:` comes before any `/`). We reject any such
+/// scheme of two or more characters: this covers plain `http://...` and
+/// the nested wrappers libavformat resolves from the prefix, e.g.
+/// `tee:http://host/out` or `concat:a.mp4|b.mp4`, which carry an inner
+/// `://` (or none) and so slipped past a `://`-only check. A single-
+/// letter scheme is a Windows drive (`C:\out.mp4`), and a path whose
+/// first `:`-or-`/` is a `/` (or that has neither) is local; both are
+/// allowed.
+fn has_url_scheme(s: &str) -> bool {
+    let Some(idx) = s.find([':', '/']) else {
+        return false;
+    };
+    if s.as_bytes()[idx] != b':' {
+        return false;
+    }
+    let scheme = &s[..idx];
+    scheme.len() >= 2
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
 }
 
 fn partial_path_for(final_path: &Path, nonce: &str) -> PathBuf {
@@ -283,5 +324,49 @@ mod tests {
         );
         assert!(!final_path.exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_url_scheme_output_without_invoking_body() {
+        for url in [
+            "http://host/out.mp4",
+            "https://host/out.mp4",
+            "ftp://host/out.mp4",
+            "rtmp://host/live",
+            "tcp://host:9000",
+            "file:///tmp/out.mp4",
+            // Nested wrappers libavformat resolves from the prefix.
+            "tee:http://host/out.mp4",
+            "concat:a.mp4|b.mp4",
+        ] {
+            let result: Result<(), NativeError> = run(url, |_p| {
+                panic!("body must not run for a URL output");
+            });
+            let err = result.unwrap_err();
+            assert_eq!(err.r#type, "invalid_request", "for {url}");
+        }
+    }
+
+    #[test]
+    fn has_url_scheme_distinguishes_paths_from_protocols() {
+        for path in [
+            "/tmp/out.mp4",
+            "out.mp4",
+            "./rel/out.mkv",
+            "C:\\Users\\out.mp4", // Windows drive letter (single-char scheme)
+            "/has spaces/out.webm",
+        ] {
+            assert!(!has_url_scheme(path), "{path} should not be a URL");
+        }
+        for url in [
+            "s3://bucket/key",
+            "tee:http://host/out.mp4",
+            "concat:a.mp4|b.mp4",
+            "subfile:,start,123,end,456,:/tmp/x.mp4",
+        ] {
+            assert!(has_url_scheme(url), "{url} should be flagged as a protocol");
+        }
+        assert!(!has_url_scheme("://nohost")); // empty scheme
+        assert!(!has_url_scheme("1http://x")); // scheme must start alpha
     }
 }
