@@ -463,7 +463,13 @@ defmodule Exmpeg.IntegrationTest do
 
     msgs = drain_progress([])
     assert msgs != [], "expected at least one progress message"
-    assert List.last(msgs).op == "remux"
+
+    last = List.last(msgs)
+    assert last.op == "remux"
+    # The closing tick reports the real end position, not 0.0, so a
+    # subscriber rendering current_pts_s / total_duration_s sees ~100% at
+    # completion. The clip is ~2 s.
+    assert last.current_pts_s > 1.5
   end
 
   test "extract_audio emits progress messages", %{clip: clip} do

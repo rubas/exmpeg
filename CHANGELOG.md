@@ -17,6 +17,13 @@
 - Bumped dev/test dependencies (`credo`, `ex_doc`, `ex_dna`, `ex_slop`)
   and refreshed transitive Rust crate versions and GitHub Actions pins.
 
+### Fixed
+
+- `remux/3`'s closing progress message now reports the real final
+  `current_pts_s` (the largest written packet pts) instead of `0.0` when
+  no `:duration_s` was given, so a subscriber rendering
+  `current_pts_s / total_duration_s` sees ~100% at completion rather than
+  0%.
 ## 0.3.0 - 2026-05-20
 
 Initial public release. Native Elixir bindings for FFmpeg 8 via the

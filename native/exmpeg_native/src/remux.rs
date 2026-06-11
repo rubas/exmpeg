@@ -119,6 +119,9 @@ pub(crate) fn remux<Q: AsRef<Path>>(
 
     let mut packets_written: u64 = 0;
     let mut packets_dropped: u64 = 0;
+    // Largest pts (in seconds) of any packet actually written, so the
+    // closing tick reports the real end position rather than 0.0.
+    let mut last_written_pts_s = 0.0;
     let mut progress =
         ProgressEmitter::from_av_duration(env, opts.progress, "remux", input.duration);
 
@@ -158,11 +161,16 @@ pub(crate) fn remux<Q: AsRef<Path>>(
 
         output.interleaved_write_frame(&mut packet)?;
         packets_written += 1;
+        if let Some(pts) = pts_s {
+            if pts > last_written_pts_s {
+                last_written_pts_s = pts;
+            }
+        }
         progress.tick(packets_written, pts_s.unwrap_or(0.0));
     }
 
     output.write_trailer()?;
-    progress.finish(packets_written, end_s.unwrap_or(0.0));
+    progress.finish(packets_written, last_written_pts_s);
 
     Ok(RemuxStats {
         packets_written,
