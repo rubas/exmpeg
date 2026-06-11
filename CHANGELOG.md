@@ -41,6 +41,14 @@
   counters; copied packets now have the container start time subtracted
   too, so both share a zero origin while keeping their true inter-stream
   offset.
+- Disk writes now use a per-call unique partial path
+  (`<stem>.partial.<nonce>.<ext>`) instead of a deterministic one. Two
+  concurrent writes to the same destination (duplicate jobs, a retry
+  racing a slow first attempt, two nodes on shared storage) no longer
+  share a partial file, so one call can no longer unlink or rename
+  another's in-progress output. The guarantee is now
+  last-complete-rename-wins: every observable destination state is a
+  complete file.
 ## 0.3.0 - 2026-05-20
 
 Initial public release. Native Elixir bindings for FFmpeg 8 via the
