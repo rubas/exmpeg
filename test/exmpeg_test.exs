@@ -21,6 +21,15 @@ defmodule ExmpegTest do
       assert {:error, %Error{reason: reason}} = Exmpeg.probe("/no/such/file.mp4")
       assert reason in [:invalid_request, :io_error]
     end
+
+    test "rejects a non-UTF-8 path without raising" do
+      # Legal on Linux (e.g. from File.ls/1) but not decodable as a Rust
+      # String; must surface as an error tuple, not a NIF decode raise.
+      assert {:error, %Error{reason: :invalid_request, message: msg}} =
+               Exmpeg.probe(<<0xFF, 0xFE, "x.mp4">>)
+
+      assert msg =~ "UTF-8"
+    end
   end
 
   describe "remux/3" do
@@ -159,6 +168,39 @@ defmodule ExmpegTest do
         assert {:error, %Error{reason: :invalid_request}} =
                  Exmpeg.transcode("in.mp4", "out.mp4", fps: bad)
       end
+    end
+
+    test "rejects an fps component past the i32 range without raising" do
+      assert {:error, %Error{reason: :invalid_request}} =
+               Exmpeg.transcode("in.mp4", "out.mp4", fps: {2_147_483_648, 1})
+    end
+
+    test "rejects a bitrate past the supported range without raising" do
+      for opt <- [video_bitrate: 10 ** 30, audio_bitrate: 10 ** 30] do
+        assert {:error, %Error{reason: :invalid_request}} =
+                 Exmpeg.transcode("in.mp4", "out.mp4", [opt])
+      end
+    end
+
+    test "rejects a non-UTF-8 string option without raising" do
+      for opt <- [video_codec: <<0xFF, 0xFE>>, audio_codec: <<0xFF>>, video_filter: <<0xFF, "x">>] do
+        assert {:error, %Error{reason: :invalid_request}} =
+                 Exmpeg.transcode("in.mp4", "out.mp4", [opt])
+      end
+    end
+
+    test "rejects a non-UTF-8 tag key or value without raising" do
+      for tags <- [[{<<0xFF>>, "v"}], [{"k", <<0xFF>>}], %{<<0xFF>> => "v"}] do
+        assert {:error, %Error{reason: :invalid_request}} =
+                 Exmpeg.transcode("in.mp4", "out.mp4", tags: tags)
+      end
+    end
+
+    test "rejects a non-{key, value} option entry without raising" do
+      assert {:error, %Error{reason: :invalid_request, message: msg}} =
+               Exmpeg.transcode("in.mp4", "out.mp4", [:fast])
+
+      assert msg =~ "key, value"
     end
 
     test "rejects empty codec names" do
