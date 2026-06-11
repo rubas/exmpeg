@@ -80,8 +80,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     decoder.open(None)?;
 
     let target_rate = pick_sample_rate(&encoder_codec, opts.sample_rate, decoder.sample_rate);
-    let target_channels =
-        crate::audio::resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
+    let target_channels = resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
     let target_layout = AVChannelLayout::from_nb_channels(target_channels);
     let target_fmt = pick_sample_fmt(&encoder_codec, decoder.sample_fmt);
 
@@ -98,15 +97,42 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     }
     encoder.open(None)?;
 
-    let mut swr = SwrContext::new(
-        &target_layout,
-        target_fmt,
-        target_rate,
-        &decoder.ch_layout,
-        decoder.sample_fmt,
-        decoder.sample_rate,
-    )?;
-    swr.init()?;
+    // Fast path: when the decoded frames are already in the target
+    // format/rate/layout and the encoder accepts arbitrary chunk sizes
+    // (pcm_*, which report `frame_size == 0`), the resampler is a pure
+    // copy and the FIFO only re-chunks for nothing. Skip both and send
+    // each decoded frame straight to the encoder.
+    //
+    // The layout must match for this to be safe: a 2-channel source with
+    // a *specific* non-stereo mask (e.g. WAVEFORMATEXTENSIBLE FL+LFE)
+    // sent unremapped under the canonical target layout the output
+    // stream advertises would mislabel/misorder its channels. An
+    // *unspecified* source order with the matching channel count has no
+    // order to preserve, so passthrough under the canonical target is
+    // fine (and avoids the resampler for the common WAV case, which
+    // reports its layout as unspecified).
+    let layout_ok = ffi_helpers::channel_layouts_equal(&decoder.ch_layout, &target_layout)
+        || (decoder.ch_layout.order == ffi::AV_CHANNEL_ORDER_UNSPEC
+            && decoder.ch_layout.nb_channels == target_channels);
+    let passthrough = encoder.frame_size == 0
+        && decoder.sample_fmt == target_fmt
+        && decoder.sample_rate == target_rate
+        && layout_ok;
+
+    let mut swr = if passthrough {
+        None
+    } else {
+        let mut swr = SwrContext::new(
+            &target_layout,
+            target_fmt,
+            target_rate,
+            &decoder.ch_layout,
+            decoder.sample_fmt,
+            decoder.sample_rate,
+        )?;
+        swr.init()?;
+        Some(swr)
+    };
 
     let mut output = AVFormatContextOutput::create(&out_url)?;
     let codec_name = encoder_codec.name().to_string_lossy().into_owned();
@@ -118,12 +144,9 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     let mut header_opts = None;
     output.write_header(&mut header_opts)?;
 
-    // The muxer may pin its own stream time_base at write_header time
-    // (the Ogg muxer forces Opus to 1/48000 regardless of the encoder's
-    // 1/sample_rate), so snapshot the chosen value and rescale every
-    // packet into it before writing. WAV/MP3/M4A/FLAC keep 1/sample_rate,
-    // where the rescale is an identity, but Opus-in-Ogg at a non-48 kHz
-    // rate is wrong without it.
+    // The muxer may override the requested stream time_base during
+    // write_header (the Ogg/Opus muxer pins 1/48000); rescale encoder
+    // packets into whatever it actually chose.
     let out_tb = output.streams()[0].time_base;
 
     // Codecs with a fixed `frame_size` (AAC, Opus, MP3) reject arbitrary
@@ -135,7 +158,11 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     } else {
         1024
     };
-    let mut fifo = AVAudioFifo::new(target_fmt, target_channels, frame_size);
+    let mut fifo = if passthrough {
+        None
+    } else {
+        Some(AVAudioFifo::new(target_fmt, target_channels, frame_size))
+    };
 
     let mut samples_written: u64 = 0;
     let mut progress =
@@ -154,24 +181,34 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
                 Err(err) => return Err(err.into()),
             };
 
-            let mut resampled =
-                alloc_resample_frame(&frame, &target_layout, target_fmt, target_rate)?;
-            swr.convert_frame(Some(&frame), &mut resampled)?;
-            if resampled.nb_samples > 0 {
-                ffi_helpers::write_fifo_frame(&mut fifo, &resampled)?;
+            if let (Some(swr), Some(fifo)) = (swr.as_mut(), fifo.as_mut()) {
+                let mut resampled =
+                    alloc_resample_frame(&frame, &target_layout, target_fmt, target_rate)?;
+                swr.convert_frame(Some(&frame), &mut resampled)?;
+                if resampled.nb_samples > 0 {
+                    ffi_helpers::write_fifo_frame(fifo, &resampled)?;
+                }
+                drain_fifo(
+                    fifo,
+                    frame_size,
+                    target_fmt,
+                    target_rate,
+                    &target_layout,
+                    &mut samples_written,
+                    &mut encoder,
+                    &mut output,
+                    out_tb,
+                    false,
+                )?;
+            } else {
+                encode_pcm_frame(
+                    frame,
+                    &mut samples_written,
+                    &mut encoder,
+                    &mut output,
+                    out_tb,
+                )?;
             }
-            drain_fifo(
-                &mut fifo,
-                frame_size,
-                target_fmt,
-                target_rate,
-                &target_layout,
-                &mut samples_written,
-                &mut encoder,
-                &mut output,
-                out_tb,
-                false,
-            )?;
             progress.tick(
                 samples_written,
                 samples_written as f64 / f64::from(target_rate),
@@ -200,13 +237,50 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             Err(RsmpegError::DecoderDrainError | RsmpegError::DecoderFlushedError) => break,
             Err(err) => return Err(err.into()),
         };
-        let mut resampled = alloc_resample_frame(&frame, &target_layout, target_fmt, target_rate)?;
-        swr.convert_frame(Some(&frame), &mut resampled)?;
-        if resampled.nb_samples > 0 {
-            ffi_helpers::write_fifo_frame(&mut fifo, &resampled)?;
+        if let (Some(swr), Some(fifo)) = (swr.as_mut(), fifo.as_mut()) {
+            let mut resampled =
+                alloc_resample_frame(&frame, &target_layout, target_fmt, target_rate)?;
+            swr.convert_frame(Some(&frame), &mut resampled)?;
+            if resampled.nb_samples > 0 {
+                ffi_helpers::write_fifo_frame(fifo, &resampled)?;
+            }
+            drain_fifo(
+                fifo,
+                frame_size,
+                target_fmt,
+                target_rate,
+                &target_layout,
+                &mut samples_written,
+                &mut encoder,
+                &mut output,
+                out_tb,
+                false,
+            )?;
+        } else {
+            encode_pcm_frame(
+                frame,
+                &mut samples_written,
+                &mut encoder,
+                &mut output,
+                out_tb,
+            )?;
+        }
+    }
+
+    // The resampler and FIFO only exist on the conversion path; drain
+    // both before flushing the encoder. The passthrough path has nothing
+    // buffered between the decoder and the encoder.
+    if let (Some(swr), Some(fifo)) = (swr.as_mut(), fifo.as_mut()) {
+        loop {
+            let mut tail = empty_resample_frame(&target_layout, target_fmt, target_rate)?;
+            swr.convert_frame(None, &mut tail)?;
+            if tail.nb_samples == 0 {
+                break;
+            }
+            ffi_helpers::write_fifo_frame(fifo, &tail)?;
         }
         drain_fifo(
-            &mut fifo,
+            fifo,
             frame_size,
             target_fmt,
             target_rate,
@@ -215,30 +289,9 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             &mut encoder,
             &mut output,
             out_tb,
-            false,
+            true,
         )?;
     }
-
-    loop {
-        let mut tail = empty_resample_frame(&target_layout, target_fmt, target_rate)?;
-        swr.convert_frame(None, &mut tail)?;
-        if tail.nb_samples == 0 {
-            break;
-        }
-        ffi_helpers::write_fifo_frame(&mut fifo, &tail)?;
-    }
-    drain_fifo(
-        &mut fifo,
-        frame_size,
-        target_fmt,
-        target_rate,
-        &target_layout,
-        &mut samples_written,
-        &mut encoder,
-        &mut output,
-        out_tb,
-        true,
-    )?;
 
     encoder.send_frame(None)?;
     write_drained_packets(&mut encoder, &mut output, out_tb)?;
@@ -358,6 +411,23 @@ fn drain_fifo(
     }
 }
 
+/// Encode a decoded frame straight through (the passthrough path), with
+/// a monotonically-increasing pts in the encoder time_base (1 / rate),
+/// mirroring what `drain_fifo` does on the conversion path.
+fn encode_pcm_frame(
+    mut frame: AVFrame,
+    samples_written: &mut u64,
+    encoder: &mut AVCodecContext,
+    output: &mut AVFormatContextOutput,
+    out_tb: ffi::AVRational,
+) -> Result<(), NativeError> {
+    frame.set_pts(*samples_written as i64);
+    *samples_written += u64::try_from(frame.nb_samples).unwrap_or(0);
+    encoder.send_frame(Some(&frame))?;
+    write_drained_packets(encoder, output, out_tb)?;
+    Ok(())
+}
+
 fn write_drained_packets(
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
@@ -424,6 +494,33 @@ fn compute_resample_capacity(src_nb_samples: i32, src_rate: i32, dst_rate: i32) 
     }
     let raw = i64::from(src_nb_samples) * i64::from(dst_rate.max(1)) / i64::from(src_rate.max(1));
     raw.saturating_add(256).clamp(1, MAX_NB_SAMPLES) as i32
+}
+
+fn resolve_channels(requested: Option<i32>, src: i32) -> Result<i32, NativeError> {
+    // When the caller hasn't asked for a specific layout we only carry
+    // mono / stereo sources through unchanged. A source with more
+    // channels (5.1, 7.1, ...) would otherwise be silently downmixed,
+    // which hides the layout change from downstream callers and
+    // violates the project's no-hidden-fallbacks rule. Force the
+    // caller to opt in to mono or stereo explicitly via `:channels`.
+    let target = if let Some(value) = requested {
+        value
+    } else if (1..=2).contains(&src) {
+        src
+    } else {
+        return Err(NativeError::new(
+            "invalid_request",
+            "source has more than 2 channels; pass `:channels` (1 or 2) to choose mono or stereo",
+        )
+        .with_detail("source_channels", src.to_string()));
+    };
+    if !(1..=2).contains(&target) {
+        return Err(
+            NativeError::new("invalid_request", "channels must be 1 (mono) or 2 (stereo)")
+                .with_detail("channels", target.to_string()),
+        );
+    }
+    Ok(target)
 }
 
 fn find_audio_stream(
