@@ -384,6 +384,22 @@ defmodule Exmpeg.IntegrationTest do
     end
   end
 
+  test "extract_audio to opus/ogg at a non-48 kHz rate keeps the right duration", %{clip: clip} do
+    # The Ogg muxer pins Opus streams to a 1/48000 stream time_base
+    # regardless of the encoder's 1/sample_rate. Without rescaling each
+    # packet into the muxer's time_base, a 16 kHz extraction reports its
+    # container duration 3x short (~0.68 s for a 2 s source) while still
+    # returning {:ok, _}. The source clip is ~2 s.
+    for ext <- ["opus", "ogg"] do
+      out = Path.join(System.tmp_dir!(), "exmpeg_audio16_#{System.unique_integer([:positive])}.#{ext}")
+      on_exit(fn -> File.rm(out) end)
+
+      assert {:ok, _stats} = Exmpeg.extract_audio(clip, out, sample_rate: 16_000)
+      assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
+      assert_in_delta format.duration_s, 2.0, 0.2
+    end
+  end
+
   test "concat rejects inputs with mismatched stream layouts", %{clip: clip} do
     video_only = TestFixtures.ensure_video_only_clip!()
     out = Path.join(System.tmp_dir!(), "exmpeg_concat_bad_#{System.unique_integer([:positive])}.mp4")

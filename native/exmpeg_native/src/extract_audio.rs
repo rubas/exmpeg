@@ -118,6 +118,14 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     let mut header_opts = None;
     output.write_header(&mut header_opts)?;
 
+    // The muxer may pin its own stream time_base at write_header time
+    // (the Ogg muxer forces Opus to 1/48000 regardless of the encoder's
+    // 1/sample_rate), so snapshot the chosen value and rescale every
+    // packet into it before writing. WAV/MP3/M4A/FLAC keep 1/sample_rate,
+    // where the rescale is an identity, but Opus-in-Ogg at a non-48 kHz
+    // rate is wrong without it.
+    let out_tb = output.streams()[0].time_base;
+
     // Codecs with a fixed `frame_size` (AAC, Opus, MP3) reject arbitrary
     // chunk sizes; we buffer through an AVAudioFifo and emit exactly
     // `frame_size` per encode call. PCM and FLAC accept any size and
@@ -161,6 +169,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
                 &mut samples_written,
                 &mut encoder,
                 &mut output,
+                out_tb,
                 false,
             )?;
             progress.tick(
@@ -205,6 +214,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             &mut samples_written,
             &mut encoder,
             &mut output,
+            out_tb,
             false,
         )?;
     }
@@ -226,11 +236,12 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
         &mut samples_written,
         &mut encoder,
         &mut output,
+        out_tb,
         true,
     )?;
 
     encoder.send_frame(None)?;
-    write_drained_packets(&mut encoder, &mut output)?;
+    write_drained_packets(&mut encoder, &mut output, out_tb)?;
 
     output.write_trailer()?;
 
@@ -311,6 +322,7 @@ fn drain_fifo(
     samples_written: &mut u64,
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
+    out_tb: ffi::AVRational,
     drain_partial: bool,
 ) -> Result<(), NativeError> {
     loop {
@@ -342,18 +354,24 @@ fn drain_fifo(
         *samples_written += u64::try_from(read).unwrap_or(0);
 
         encoder.send_frame(Some(&frame))?;
-        write_drained_packets(encoder, output)?;
+        write_drained_packets(encoder, output, out_tb)?;
     }
 }
 
 fn write_drained_packets(
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
+    out_tb: ffi::AVRational,
 ) -> Result<(), NativeError> {
+    let enc_tb = encoder.time_base;
     loop {
         match encoder.receive_packet() {
             Ok(mut packet) => {
                 packet.set_stream_index(0);
+                // Encoder packets carry timestamps in the encoder
+                // time_base (1/sample_rate); rescale into the muxer's
+                // chosen stream time_base before writing.
+                packet.rescale_ts(enc_tb, out_tb);
                 output.interleaved_write_frame(&mut packet)?;
             }
             Err(RsmpegError::EncoderDrainError | RsmpegError::EncoderFlushedError) => break,

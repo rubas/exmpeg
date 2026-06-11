@@ -29,7 +29,12 @@
   early exit, including a panic unwind (which `catch_unwind` only catches
   one frame up), and is disarmed only after the rename onto the
   destination succeeds.
-
+- `extract_audio/3` to `.opus` / `.ogg` at a sample rate other than
+  48 kHz no longer produces a file whose container duration is wrong. The
+  Ogg muxer pins Opus streams to a `1/48000` time_base, so encoder
+  packets are now rescaled into the muxer's chosen stream time_base
+  before writing (previously a 16 kHz extraction reported ~3x short).
+  WAV/MP3/M4A/FLAC are unaffected (the rescale is an identity there).
 ## 0.3.0 - 2026-05-20
 
 Initial public release. Native Elixir bindings for FFmpeg 8 via the
