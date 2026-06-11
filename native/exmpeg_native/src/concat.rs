@@ -114,6 +114,7 @@ pub(crate) fn concat<P: AsRef<Path>>(
         &first,
         &out_time_bases,
         &mut pts_offset,
+        &next_min_dts,
         &mut total_duration_s,
     );
     progress.tick(packets_written, total_duration_s);
@@ -136,6 +137,7 @@ pub(crate) fn concat<P: AsRef<Path>>(
             &input,
             &out_time_bases,
             &mut pts_offset,
+            &next_min_dts,
             &mut total_duration_s,
         );
         progress.tick(packets_written, total_duration_s);
@@ -224,23 +226,59 @@ fn advance_offsets(
     input: &AVFormatContextInput,
     out_time_bases: &[ffi::AVRational],
     pts_offset: &mut [i64],
+    next_min_dts: &[i64],
     total_duration_s: &mut f64,
 ) {
-    // Use the container's total duration as the increment for every
-    // stream. This sidesteps per-packet bookkeeping (which is fragile
-    // across timestamp gaps, dts-leading-pts B-frame streams, and
-    // packets with `AV_NOPTS_VALUE`).
     let duration_ticks = input.duration; // in AV_TIME_BASE units.
-    if duration_ticks <= 0 {
+    if duration_ticks > 0 {
+        // Container duration is known: use it as the increment for every
+        // stream. This sidesteps per-packet bookkeeping (which is fragile
+        // across timestamp gaps, dts-leading-pts B-frame streams, and
+        // packets with `AV_NOPTS_VALUE`).
+        let dur_s = duration_ticks as f64 / f64::from(ffi::AV_TIME_BASE);
+        *total_duration_s += dur_s;
+        for (idx, tb) in out_time_bases.iter().enumerate() {
+            let increment = (dur_s * f64::from(tb.den) / f64::from(tb.num)).round() as i64;
+            pts_offset[idx] += increment;
+        }
         return;
     }
-    let dur_s = duration_ticks as f64 / f64::from(ffi::AV_TIME_BASE);
-    *total_duration_s += dur_s;
 
+    // Unknown container duration (mkv/webm from a non-seekable sink:
+    // MediaRecorder, an interrupted capture). `process_input` ratchets
+    // `next_min_dts[idx]` to `dts + packet duration` of the last written
+    // packet, i.e. the absolute output-time end this input reached.
+    // Advance the offset to that end so the next input starts cleanly
+    // after it. Without this the offset stayed put and every packet of
+    // the following input tripped the monotonic-dts ratchet, flattening
+    // its real (VFR) inter-frame gaps to the filled packet duration.
+    //
+    // Use one segment end - the latest end across all streams - and
+    // advance *every* stream to it, mirroring the known-duration path
+    // (which adds the same increment to each stream). Advancing each
+    // stream to its own end instead would offset streams by different
+    // wall-clock amounts when they end at slightly different times (audio
+    // is often a little shorter than video because of encoder padding),
+    // so the next input's audio would start before/after its video and
+    // the segment boundary would lose A/V sync.
+    let sentinel = i64::MIN / 2;
+    let mut segment_end_s = *total_duration_s;
     for (idx, tb) in out_time_bases.iter().enumerate() {
-        let increment = (dur_s * f64::from(tb.den) / f64::from(tb.num)).round() as i64;
-        pts_offset[idx] += increment;
+        if next_min_dts[idx] > sentinel {
+            let end_s = next_min_dts[idx] as f64 * f64::from(tb.num) / f64::from(tb.den);
+            if end_s > segment_end_s {
+                segment_end_s = end_s;
+            }
+        }
     }
+    for (idx, tb) in out_time_bases.iter().enumerate() {
+        let end_ticks = (segment_end_s * f64::from(tb.den) / f64::from(tb.num)).round() as i64;
+        // Never move an offset backwards.
+        if end_ticks > pts_offset[idx] {
+            pts_offset[idx] = end_ticks;
+        }
+    }
+    *total_duration_s = segment_end_s;
 }
 
 fn assert_layout_matches(

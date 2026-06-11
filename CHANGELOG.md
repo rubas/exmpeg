@@ -59,6 +59,13 @@
   frame interval in the encoder time_base instead of by a bare `1`, so a
   chain like `crop=...` keeps the real duration instead of collapsing the
   stream to a few microseconds. The default filter chain is unaffected.
+- `concat/3` no longer corrupts timing when an input's container
+  duration is unknown (mkv/webm from a non-seekable sink such as
+  MediaRecorder or an interrupted capture). The per-stream offset is now
+  advanced from the tracked end of the written packets instead of being
+  left in place, so the following input no longer overlaps and trips the
+  monotonic-dts ratchet (which flattened its real inter-frame gaps).
+  `duration_s` now reports the summed input durations instead of `0.0`.
 
 ### Security
 

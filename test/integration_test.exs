@@ -136,6 +136,37 @@ defmodule Exmpeg.IntegrationTest do
     assert format.duration_s > 5.5 and format.duration_s < 6.5
   end
 
+  test "concat of duration-less inputs reports and writes the summed duration" do
+    # A webm muxed to a pipe (a non-seekable sink, like MediaRecorder or
+    # an interrupted capture) carries no container duration. The concat
+    # offset is then advanced from the tracked per-stream end instead of
+    # the (unknown) container duration; without that the second input
+    # overlapped the first, duration_s came back 0.0, and every packet of
+    # the second half was retimed to a single filled gap.
+    a = make_pipe_webm(2)
+    b = make_pipe_webm(2)
+    out = Path.join(System.tmp_dir!(), "exmpeg_vfrcat_#{System.unique_integer([:positive])}.webm")
+    on_exit(fn -> Enum.each([a, b, out], &File.rm/1) end)
+
+    # Confirm the fixtures really lack a container duration, so the test
+    # exercises the unknown-duration path rather than the known one.
+    assert {:ok, %MediaInfo{format: %{duration_s: nil}}} = Exmpeg.probe(a)
+
+    assert {:ok, stats} = Exmpeg.concat([a, b], out)
+    assert stats.inputs_joined == 2
+    assert_in_delta stats.duration_s, 4.0, 0.3
+
+    assert {:ok, %MediaInfo{format: format, streams: streams}} = Exmpeg.probe(out)
+    assert_in_delta format.duration_s, 4.0, 0.3
+
+    # Both streams survive the two-input join: the unknown-duration path
+    # advances every stream to one shared segment end, so the multi-stream
+    # boundary is handled (a webm container carries no per-stream duration
+    # to assert finer A/V alignment from).
+    assert Enum.any?(streams, &(&1.kind == :video))
+    assert Enum.any?(streams, &(&1.kind == :audio))
+  end
+
   test "transcode re-encodes both streams with libx264 + aac", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_xc_#{System.unique_integer([:positive])}.mp4")
     on_exit(fn -> File.rm(out) end)
@@ -610,6 +641,27 @@ defmodule Exmpeg.IntegrationTest do
     msgs = drain_progress([])
     assert msgs != []
     assert List.last(msgs).op == "concat"
+  end
+
+  # A `seconds`-long VP8 webm muxed to a pipe. Writing to a non-seekable
+  # sink leaves the container duration unset, which is the case this
+  # exercises (MediaRecorder / interrupted captures behave the same way).
+  defp make_pipe_webm(seconds) do
+    path = Path.join(System.tmp_dir!(), "exmpeg_pipe_#{System.unique_integer([:positive])}.webm")
+
+    # Both a video and an audio stream, so the concat boundary exercises
+    # advancing every stream to one shared segment end.
+    {bytes, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -f lavfi -i testsrc2=s=128x96:r=10:d=#{seconds}) ++
+          ~w(-f lavfi -i sine=frequency=440:duration=#{seconds}) ++
+          ~w(-c:v libvpx -c:a libvorbis -f webm pipe:1),
+        env: %{}
+      )
+
+    File.write!(path, bytes)
+    path
   end
 
   defp drain_progress(acc) do
