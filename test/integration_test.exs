@@ -124,6 +124,34 @@ defmodule Exmpeg.IntegrationTest do
     assert %Stream{codec: "pcm_s16le", audio: %{sample_rate: 16_000, channels: 1}} = audio
   end
 
+  test "extract_audio passes a PCM source through unchanged when no resample is needed" do
+    # A pcm_s16le source extracted to .wav with no rate/channel override
+    # needs no resampling and the pcm encoder takes arbitrary chunk sizes,
+    # so the fast path skips the resampler and FIFO. The output must still
+    # be a correct, complete file.
+    src = Path.join(System.tmp_dir!(), "exmpeg_pcm_#{System.unique_integer([:positive])}.wav")
+    out = Path.join(System.tmp_dir!(), "exmpeg_pcm_out_#{System.unique_integer([:positive])}.wav")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i sine=frequency=440:duration=2:sample_rate=44100) ++
+          ~w(-ac 2 -c:a pcm_s16le #{src}),
+        env: %{}
+      )
+
+    assert {:ok, stats} = Exmpeg.extract_audio(src, out)
+    assert stats.codec == "pcm_s16le"
+    assert stats.sample_rate == 44_100
+    assert stats.channels == 2
+    assert_in_delta stats.duration_s, 2.0, 0.1
+
+    assert {:ok, %MediaInfo{format: format, streams: [audio]}} = Exmpeg.probe(out)
+    assert_in_delta format.duration_s, 2.0, 0.1
+    assert %Stream{codec: "pcm_s16le", audio: %{sample_rate: 44_100, channels: 2}} = audio
+  end
+
   test "concat joins three copies into a 6 s output", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_concat_#{System.unique_integer([:positive])}.mp4")
     on_exit(fn -> File.rm(out) end)

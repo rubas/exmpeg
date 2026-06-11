@@ -18,6 +18,7 @@ use rsmpeg::avcodec::AVCodecParameters;
 use rsmpeg::avformat::AVFormatContextOutput;
 use rsmpeg::avutil::{AVAudioFifo, AVDictionary, AVFrame};
 use rsmpeg::error::RsmpegError;
+use rsmpeg::ffi;
 
 /// Reconstruct an `Env` struct from a raw `NIF_ENV` pointer.
 ///
@@ -28,6 +29,21 @@ pub(crate) fn reconstruct_env<'a>(c_env: rustler::wrapper::NIF_ENV) -> rustler::
     // Creating an Env is unsafe because it lets the caller create arbitrary lifetime references,
     // which is sound as long as the returned Env does not escape the NIF call.
     unsafe { rustler::Env::new(&(), c_env) }
+}
+
+/// Whether two channel layouts are semantically identical - the same
+/// channels in the same positions (not just the same count). Returns
+/// `false` on the rare comparison error so callers fall back to the safe
+/// path. `decoder.ch_layout` is exposed as the raw `ffi::AVChannelLayout`,
+/// which rsmpeg's safe `AVChannelLayout::equal` cannot be called on
+/// directly.
+pub(crate) fn channel_layouts_equal(a: &ffi::AVChannelLayout, b: &ffi::AVChannelLayout) -> bool {
+    // SAFETY: `a` and `b` are valid references to initialized
+    // `AVChannelLayout`s that outlive this call; `av_channel_layout_compare`
+    // only reads them and retains no pointer. It returns 0 when equal, a
+    // positive value when different, and a negative AVERROR on bad input;
+    // only 0 counts as equal.
+    unsafe { ffi::av_channel_layout_compare(a, b) == 0 }
 }
 
 /// Zero the `codec_tag` field of an `AVCodecParameters` so the muxer
