@@ -1,7 +1,5 @@
 # Changelog
 
-<<<<<<< conflict 1 of 1
-+++++++ tusrsmoz abf10647 "fix: report the real final pts in the remux closing progress tick (#32)" (rebase destination)
 ## Unreleased
 
 ### Changed
