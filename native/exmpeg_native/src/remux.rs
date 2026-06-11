@@ -59,6 +59,7 @@ pub(crate) struct RemuxStats {
     pub(crate) streams_copied: u32,
 }
 
+#[allow(clippy::too_many_lines)] // Setup -> per-stream map -> copy loop is naturally linear.
 pub(crate) fn remux<Q: AsRef<Path>>(
     env: Env<'_>,
     source: crate::input::InputSource,
@@ -189,25 +190,25 @@ pub(crate) fn remux<Q: AsRef<Path>>(
                 packets_dropped += 1;
                 continue;
             }
-            if let Some(end) = end_s {
-                if ts >= end {
-                    packets_dropped += 1;
-                    if window_gated[out_index as usize] {
-                        done[out_index as usize] = true;
-                    }
-                    // Stop once every gated stream has crossed the window,
-                    // or once we are well past it. The slack guards the
-                    // case the per-stream flags cannot: a gated stream
-                    // that ends *before* the window (a short audio track,
-                    // for example) never crosses, so without this a
-                    // bounded cut would keep reading to EOF. Interleaving
-                    // lag in a sane file is well under this slack, so no
-                    // in-window packet of a lagging stream is dropped.
-                    if done.iter().all(|&d| d) || ts >= end + WINDOW_SLACK_S {
-                        break;
-                    }
-                    continue;
+            if let Some(end) = end_s
+                && ts >= end
+            {
+                packets_dropped += 1;
+                if window_gated[out_index as usize] {
+                    done[out_index as usize] = true;
                 }
+                // Stop once every gated stream has crossed the window, or
+                // once we are well past it. The slack guards the case the
+                // per-stream flags cannot: a gated stream that ends
+                // *before* the window (a short audio track, for example)
+                // never crosses, so without this a bounded cut would keep
+                // reading to EOF. Interleaving lag in a sane file is well
+                // under this slack, so no in-window packet of a lagging
+                // stream is dropped.
+                if done.iter().all(|&d| d) || ts >= end + WINDOW_SLACK_S {
+                    break;
+                }
+                continue;
             }
         }
 
