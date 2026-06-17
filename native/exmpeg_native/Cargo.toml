@@ -17,10 +17,13 @@ rustler = "0.38.0"
 # discovery path when building against a non-default install.
 #
 # Pinned to a specific rsmpeg git revision because the released
-# 0.18.0+ffmpeg.8.0 on crates.io fails to compile against FFmpeg 8.0.1:
-# an `avio_alloc_context` const-correctness change tightened the second
-# parameter of the write callback from `uint8_t *` to `const uint8_t *`;
-# git has the matching cfg gate, crates.io does not.
+# 0.18.0+ffmpeg.8.0 on crates.io fails to compile against FFmpeg 8.0.1
+# and later 8.x: an `avio_alloc_context` const-correctness change
+# tightened the second parameter of the write callback from
+# `uint8_t *` to `const uint8_t *`; git has the matching cfg gate,
+# crates.io does not. The rev below is the latest rsmpeg master commit
+# and builds cleanly against FFmpeg 8.1 (libavformat 62.x), which is the
+# version CI, the release artefacts, and devenv now target.
 #
 # Pin to `rev` (not `branch`) so a rebase or branch deletion upstream
 # cannot silently change what `cargo fetch` resolves on a fresh build.

@@ -18,7 +18,7 @@ inputs:
   ffmpeg-version:
     description: "FFmpeg release tag to build into ~/.local/ffmpeg"
     required: false
-    default: "8.0.1"
+    default: "8.1"
   cache-fixtures:
     description: "Set to 'true' to cache the integration-test fixtures"
     required: false
