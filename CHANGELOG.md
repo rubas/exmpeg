@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Build and test against FFmpeg 8.1 (was 8.0.1): the CI verification
+  build, the distributed precompiled-NIF release artefacts, and the local
+  `devenv` toolchain now all target FFmpeg 8.1. The pinned rsmpeg
+  revision compiles unchanged against 8.1's libavformat 62.x, so there is
+  no source or API change. Consumers building from source
+  (`EXMPEG_BUILD=1`) should link against an FFmpeg 8.x install;
+  precompiled-NIF consumers are unaffected.
+
 ## 0.4.0 - 2026-06-11
 
 ### Added
