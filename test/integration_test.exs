@@ -9,8 +9,9 @@ defmodule Exmpeg.IntegrationTest do
   the `ffmpeg` CLI; assertions stay at the public API and container
   metadata boundary.
 
-  Excluded from the default `mix test` run because they require an
-  `ffmpeg` binary on `PATH` for fixture generation. Run with:
+  Excluded from the default `mix test` run because they require the
+  `ffmpeg` and `ffprobe` binaries on `PATH` (fixture generation and
+  packet-timing assertions). Run with:
 
       mix test --include integration
   """
@@ -23,10 +24,15 @@ defmodule Exmpeg.IntegrationTest do
   @moduletag timeout: 120_000
 
   setup_all do
-    if System.find_executable("ffmpeg") == nil do
-      {:skip, "ffmpeg binary not on PATH; cannot generate fixtures"}
-    else
-      {:ok, clip: TestFixtures.ensure_av_clip!()}
+    cond do
+      System.find_executable("ffmpeg") == nil ->
+        {:skip, "ffmpeg binary not on PATH; cannot generate fixtures"}
+
+      System.find_executable("ffprobe") == nil ->
+        {:skip, "ffprobe binary not on PATH; required for packet-timing assertions"}
+
+      true ->
+        {:ok, clip: TestFixtures.ensure_av_clip!()}
     end
   end
 
@@ -242,10 +248,24 @@ defmodule Exmpeg.IntegrationTest do
 
     # Both streams survive the two-input join: the unknown-duration path
     # advances every stream to one shared segment end, so the multi-stream
-    # boundary is handled (a webm container carries no per-stream duration
-    # to assert finer A/V alignment from).
+    # boundary is handled.
     assert Enum.any?(streams, &(&1.kind == :video))
     assert Enum.any?(streams, &(&1.kind == :audio))
+
+    # Finer than the container duration: the inputs are 10 fps CFR, so every
+    # output video packet must sit one ~0.1 s frame apart across the whole
+    # join, and the second input's packets must be offset into the 2-4 s
+    # window. The original bug advanced no offset for a duration-less input,
+    # so the second input either overlapped the first (max pts near 2 s) or
+    # was retimed onto a single filled gap (compressed spacing); both show up
+    # in the packet timestamps below where the container duration alone hides
+    # them.
+    pts = video_packet_pts_times(out)
+    assert length(pts) >= 36 and length(pts) <= 44
+    assert Enum.max(pts) > 3.5
+
+    gaps = pts |> Enum.chunk_every(2, 1, :discard) |> Enum.map(fn [a, b] -> b - a end)
+    assert Enum.all?(gaps, &(&1 > 0.08 and &1 < 0.13))
   end
 
   test "transcode re-encodes both streams with libx264 + aac", %{clip: clip} do
@@ -804,6 +824,28 @@ defmodule Exmpeg.IntegrationTest do
 
     File.write!(path, bytes)
     path
+  end
+
+  # Sorted presentation timestamps (seconds) of a file's video packets, read
+  # via ffprobe. The probe API exposes stream/format metadata but not
+  # per-packet timing, so concat boundary timing is asserted through this.
+  defp video_packet_pts_times(path) do
+    {out, 0} =
+      System.cmd(
+        "ffprobe",
+        ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+        env: %{}
+      )
+
+    out
+    |> String.split("\n", trim: true)
+    |> Enum.flat_map(fn line ->
+      case Float.parse(line) do
+        {f, _} -> [f]
+        :error -> []
+      end
+    end)
+    |> Enum.sort()
   end
 
   test "killing the caller mid-transcode cancels the NIF and removes the partial" do
