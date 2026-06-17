@@ -69,8 +69,8 @@ task check        # full gate
 ```
 
 The integration suite (`mix test --include integration`) requires the
-`ffmpeg` CLI on `PATH` for fixture generation. The library itself never
-shells out.
+`ffmpeg` and `ffprobe` CLIs on `PATH` (fixture generation and
+packet-timing assertions). The library itself never shells out.
 
 ## Releasing
 
