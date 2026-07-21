@@ -9,9 +9,9 @@ permissions: {}
 
 env:
   MIX_ENV: test
-  ELIXIR_VERSION: "1.20.1"
+  ELIXIR_VERSION: "1.20.2"
   OTP_VERSION: "29.0"
-  RUST_TOOLCHAIN: "1.94.1"
+  RUST_TOOLCHAIN: "1.97.1"
   EXMPEG_BUILD: "1"
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -41,7 +41,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL https://github.com/zizmorcore/zizmor/releases/download/v1.25.2/zizmor-x86_64-unknown-linux-gnu.tar.gz \
+          curl -fsSL https://github.com/zizmorcore/zizmor/releases/download/v1.27.0/zizmor-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C "$HOME/.local/bin" zizmor
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
