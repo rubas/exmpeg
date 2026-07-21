@@ -14,13 +14,14 @@ tasks:
     desc: Bump Elixir + Rust deps to latest compatible (within mix.exs / Cargo.toml constraints)
     cmds:
       - mix deps.update --all
+      - cargo upgrade --manifest-path {{.CARGO_MANIFEST}} --incompatible allow
       - cargo update --manifest-path {{.CARGO_MANIFEST}}
 
   outdated:
     desc: Report deps that have newer releases available on Hex / crates.io
     cmds:
       - mix hex.outdated
-      - 'cargo outdated --manifest-path {{.CARGO_MANIFEST}} --root-deps-only || echo "(install cargo-outdated: cargo install cargo-outdated)"'
+      - cargo upgrade --dry-run --manifest-path {{.CARGO_MANIFEST}} --incompatible allow
 
   compile:
     desc: Compile project (builds NIF; first run takes several minutes)
