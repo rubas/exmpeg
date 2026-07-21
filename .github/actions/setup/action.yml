@@ -45,13 +45,13 @@ runs:
       uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
 
     - name: Setup Elixir/OTP
-      uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1
+      uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
       with:
         elixir-version: ${{ inputs.elixir-version }}
         otp-version: ${{ inputs.otp-version }}
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
       with:
         toolchain: ${{ inputs.rust-toolchain }}
         components: ${{ inputs.rust-components }}
@@ -80,7 +80,7 @@ runs:
 
     - name: Cache FFmpeg ${{ inputs.ffmpeg-version }} install
       id: ffmpeg-cache
-      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.local/ffmpeg
         # `codecs-v3` is part of the key so the configure-flag changes
@@ -148,7 +148,7 @@ runs:
         fi
 
     - name: Cache Elixir build + deps
-      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           _build
@@ -158,7 +158,7 @@ runs:
           ${{ runner.os }}-${{ runner.arch }}-mix-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-
 
     - name: Cache Cargo registry + git
-      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cargo/registry
@@ -168,7 +168,7 @@ runs:
           ${{ runner.os }}-${{ runner.arch }}-cargo-${{ inputs.rust-toolchain }}-
 
     - name: Cache native build artifacts (Cargo target)
-      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           native/exmpeg_native/target
