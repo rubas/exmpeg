@@ -1,111 +1,98 @@
-# AGENTS.md
+# exmpeg
 
-Project-specific guidance for AI coding assistants working in this repo.
-General rules in `~/.claude/CLAUDE.md` still apply.
+A Rustler NIF over `rsmpeg` (FFmpeg 8) that replaces shelling out to the
+`ffmpeg` / `ffprobe` CLIs. It ships on Hex with precompiled NIFs, so the
+public API, the option validators, and the error taxonomy are a contract
+with strangers.
 
-## What this library is
+Two files own what this one does not repeat: the `Exmpeg` moduledoc
+documents the public functions and their options, `RELEASE.md` the
+release flow.
 
-A Rustler NIF over `rsmpeg` (Rust FFmpeg bindings, FFmpeg 8). Replaces
-shelling out to the `ffmpeg` / `ffprobe` CLI with in-process calls.
+## Gates
 
-`v0.1` exposes:
+`task check` is the default gate: format check, compile with
+`--warnings-as-errors`, credo strict, clippy with `-D warnings`, Elixir
+unit tests, Rust tests, and zizmor over the workflows.
 
-- `Exmpeg.version/0`         - linked FFmpeg version info.
-- `Exmpeg.probe/1`           - container + per-stream metadata.
-- `Exmpeg.remux/3`           - stream copy between containers with
-                               optional time window and stream filters.
-- `Exmpeg.extract_frame/3`   - single image at a timestamp.
-- `Exmpeg.extract_audio/3`   - audio stream to WAV / MP3 / Opus / FLAC /
-                               M4A.
-- `Exmpeg.concat/3`          - stream-copy concatenation of multiple
-                               inputs.
-- `Exmpeg.transcode/3`       - per-stream re-encode with codec / bitrate
-                               / scale / fps / filter selection.
+`task test:integration` is the expensive one. It builds fixtures with the
+`ffmpeg` CLI and asserts packet timing with `ffprobe`, so both must be on
+`PATH`; each test skips itself when one is missing. Run it after any
+change to a demux, mux, or codec path. CI runs it on every pull request
+and on every push to `main`.
+
+The first `task compile` builds the NIF from source and takes several
+minutes. devenv sets `EXMPEG_BUILD=1`, so a local build never pulls a
+precompiled artefact.
 
 ## Layout
 
-```
-lib/exmpeg.ex                  # public API + option validation
-lib/exmpeg/native.ex           # rustler_precompiled stubs (do not call directly)
-lib/exmpeg/error.ex            # typed error struct
-lib/exmpeg/media_info.ex       # probe result top-level struct
-lib/exmpeg/stream.ex           # per-stream metadata struct
-native/exmpeg_native/          # Rust crate
-  src/lib.rs                   # NIF init + dispatch
-  src/probe.rs                 # probe implementation
-  src/remux.rs                 # stream-copy implementation
-  src/extract_frame.rs         # decode -> swscale -> image2 writer
-  src/extract_audio.rs         # decode -> swresample -> WAV/MP3/Opus/...
-  src/concat.rs                # multi-input stream-copy
-  src/transcode.rs             # decoder + (swscale|filtergraph|swr) + encoder
-  src/version.rs               # version reporter
-  src/errors.rs                # NIF error mapping
-  src/ffi_helpers.rs           # the only `unsafe` in the crate
-```
+`native/exmpeg_native/src/` holds one file per operation plus shared
+modules each operation pulls in as it needs them: `input.rs` (path,
+`{:memory, _}`, and buffer sources), `atomic_output.rs` (partial file
+plus rename), `cancel.rs` (caller-liveness checks), `progress.rs`
+(throttled progress messages), `audio.rs` (resampling helpers), and
+`ffi_helpers.rs`. A read-only operation uses few of them: `nif_probe`
+takes none but `input.rs`, and `nif_version` and `nif_load_buffer` take
+none at all.
 
-## Working rules
+`lib/exmpeg/native.ex` holds the `rustler_precompiled` stubs and stays
+private to the library. Stub names match the Rust NIF symbols verbatim.
 
-- The Elixir public API is the contract. Native maps are private; always
-  go through the `build_*` helpers in `Exmpeg`.
-- Every `def` gets a `@spec`. Strict module layout is enforced via
-  credo, except for `lib/exmpeg/native.ex` (RustlerPrecompiled requires
-  module attributes before `use`).
-- Rust crate has `#![deny(unsafe_code)]` at the root. Any `unsafe`
-  block must live in `src/ffi_helpers.rs` (the single audit surface)
-  and be wrapped in a safe public function with a `SAFETY:` comment.
-- Every NIF entry point goes through `run_with_panic_protection` so a
-  Rust panic surfaces as `{:error, %{type: "nif_panic"}}` rather than
-  crashing the VM.
+## House decisions
 
-## Quality gates
+- `#![deny(unsafe_code)]` sits at the crate root and `ffi_helpers.rs` is
+  the single audit surface: it re-enables `unsafe`, and every block there
+  hides behind a safe function with a `SAFETY:` comment. An `unsafe`
+  block anywhere else fails the build, which is the point.
+- Every NIF entry point runs inside `run_with_panic_protection`, so a
+  Rust panic returns `{:error, %{type: "nif_panic"}}` instead of taking
+  down the VM.
+- A native error uses a `type` string from a closed set:
+  `invalid_request`, `io_error`, `decode_error`, `encode_error`,
+  `unsupported`, `runtime_error`, `cancelled`, `nif_panic`.
+  `Exmpeg.Error.from_native/1` maps it to an atom, and an unknown string
+  falls through to `:native_error`.
+- The `build_*` functions in `Exmpeg` match the NIF result map strictly
+  in the function head, so a dropped field fails there instead of
+  producing a half-filled struct. `test/exmpeg/nif_contract_test.exs`
+  exercises them without a NIF call.
+- Every `def` has a `@spec`, and credo enforces strict module layout.
+  `.credo.exs` excludes `lib/exmpeg/native.ex` from the layout check
+  because `use RustlerPrecompiled` needs its module attributes first.
+- Every input opens with FFmpeg's `protocol_whitelist` pinned:
+  `file,crypto,data` for a path, `crypto,data` for `{:memory, _}` and for
+  a loaded buffer.
+- The precompiled binaries link an LGPL FFmpeg, so `libx264` and
+  `libx265` return `:unsupported` there. A source build against a
+  GPL-enabled FFmpeg 8 gets them.
 
-```
-task fmt:check
-task compile      # mix compile --warnings-as-errors (builds NIF)
-task lint         # mix credo --strict + cargo clippy -D warnings
-task test         # mix test (fast unit tests)
-task test:rust    # cargo test
-task check        # full gate
-```
+## Add an operation
 
-The integration suite (`mix test --include integration`) requires the
-`ffmpeg` and `ffprobe` CLIs on `PATH` (fixture generation and
-packet-timing assertions). The library itself never shells out.
+1. Implement it in `native/exmpeg_native/src/<op>.rs`, returning
+   `Result<T, NativeError>` with a `type` from the set above.
+2. Add the `nif_<op>` entry point in `src/lib.rs`: `schedule = "DirtyIo"`
+   for I/O-bound work, `"DirtyCpu"` for codec work.
+3. Add the stub and its wrapper in `lib/exmpeg/native.ex`.
+4. Build the typed public API in `lib/exmpeg.ex`: validate the options,
+   call `Native`, map errors through `Error.from_native/1`.
+5. Test three ways: option validation, the NIF map shape in
+   `nif_contract_test.exs`, and a round trip against a synthetic fixture
+   in `integration_test.exs`.
 
-## Releasing
+## Pitfalls
 
-See `RELEASE.md` for the full flow. Short version:
-
-1. Bump `@version` in `mix.exs`, update `CHANGELOG.md`, merge to `main`.
-2. `.github/workflows/release.yml` builds one tarball per target listed
-   in `lib/exmpeg/native.ex` `:targets`, creates the `vX.Y.Z` tag, and
-   attaches the tarballs plus `SHA256SUMS` to a GitHub release.
-3. Locally: `task checksum:download` to refresh
-   `checksum-Elixir.Exmpeg.Native.exs` from the release artefacts. Commit it.
-4. `task release:publish` to push to Hex.
-
-## Adding a new operation
-
-1. Add the implementation to `native/exmpeg_native/src/<op>.rs`. Return
-   `Result<T, NativeError>`. Categorize errors with the existing
-   `"invalid_request" | "io_error" | "decode_error" | "encode_error" |
-   "unsupported" | "runtime_error"` taxonomy.
-2. Wire a `nif_<op>` entry point in `src/lib.rs` (use `schedule =
-   "DirtyIo"` for I/O-bound work, `"DirtyCpu"` for codec work).
-3. Add the stub + thin wrapper in `lib/exmpeg/native.ex`.
-4. Build the typed public API in `lib/exmpeg.ex`: validate options,
-   call into Native, map errors via `Error.from_native/1`.
-5. Pin the NIF map shape via a `@doc false def build_*` so refactors
-   that drop a field fail compile-time.
-6. Test: unit test option validation, NIF contract test the
-   `build_*` shape, integration test the round-trip against a synthetic
-   fixture.
-
-## Don't
-
-- Don't widen `Exmpeg.Error.reason/0` without adding a `to_reason/1`
-  clause _and_ matching tests.
-- Don't surface raw `{:error, %{type: _}}` tuples from the NIF to the
-  caller - always wrap with `Error.from_native/1`.
-- Don't bypass option validators in `lib/exmpeg.ex` "for performance".
-  Validation runs once per call and prevents silent NIF errors.
+- Never return a raw `{:error, %{type: _}}` NIF map to a caller. Wrap it
+  with `Error.from_native/1` so the caller matches on `Exmpeg.Error`.
+- Never add a `type` string without its `to_reason/1` clause in
+  `lib/exmpeg/error.ex` and a test. Without the clause the new type
+  degrades to `:native_error` and nobody notices.
+- Never skip an option validator in `lib/exmpeg.ex` for speed. It runs
+  once per call and turns a typo into `:invalid_request` instead of an
+  opaque native failure.
+- Never probe an untrusted upload by path. A path input allows the `file`
+  protocol, so a crafted on-disk HLS or DASH manifest points FFmpeg at
+  other local files. Pass the bytes as `{:memory, binary}` or through
+  `Exmpeg.load_buffer/1`.
+- Never shell out from `lib/`. The `ffmpeg` and `ffprobe` CLIs belong to
+  `test/support/fixtures.ex` and the integration assertions only.
