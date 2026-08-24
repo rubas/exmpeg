@@ -31,7 +31,7 @@ defmodule Exmpeg.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md", "usage-rules.md", "LICENSE"],
+      extras: ["README.md", "CHANGELOG.md", "LICENSE"],
       source_url: @source_url,
       source_ref: "v#{@version}",
       homepage_url: @source_url
@@ -54,7 +54,7 @@ defmodule Exmpeg.MixProject do
         "FFmpeg" => "https://ffmpeg.org/"
       },
       files:
-        ~w(lib native/exmpeg_native/src native/exmpeg_native/Cargo.toml native/exmpeg_native/Cargo.lock checksum-*.exs mix.exs README.md CHANGELOG.md LICENSE* usage-rules.md)
+        ~w(lib native/exmpeg_native/src native/exmpeg_native/Cargo.toml native/exmpeg_native/Cargo.lock checksum-*.exs mix.exs README.md CHANGELOG.md LICENSE*)
     ]
   end
 
