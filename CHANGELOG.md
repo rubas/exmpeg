@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Refresh the Hex and Cargo lockfiles. `earmark_parser` 1.4.44 to 1.4.46 and
+  `ex_slop` 0.4.3 to 0.4.4 are dev and test only. The runtime deps do not move:
+  `rustler_precompiled` stays 0.9.0 and `rustler` stays 0.38.0. The Cargo
+  lockfile takes compatible patch releases. The rsmpeg git pin does not change.
+- CI now uses Elixir 1.20.3 (was 1.20.2) and OTP 29.0.5 (was 29.0). This
+  applies to `ci.yml` and `security.yml`. `mix.exs` keeps
+  `elixir: "~> 1.17"` as the minimum version.
+
 ## 0.4.1 - 2026-06-17
 
 ### Changed
