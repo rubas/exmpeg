@@ -54,7 +54,8 @@ impl CancelGuard {
     /// Return `Err("cancelled")` when the calling process has died.
     /// Throttled to [`CHECK_INTERVAL`]; calls between checks return
     /// `Ok(())` without touching the scheduler lock. Call it once near
-    /// the top of every packet loop iteration.
+    /// the top of every packet loop iteration and once per frame a
+    /// filter graph drain emits.
     pub(crate) fn check(&mut self) -> Result<(), NativeError> {
         let now = Instant::now();
         if let Some(last) = self.last_check

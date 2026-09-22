@@ -893,6 +893,46 @@ defmodule Exmpeg.IntegrationTest do
     assert eventually(fn -> partials_for(out) == [] and not File.exists?(out) end, 10_000)
   end
 
+  test "killing the caller while the filter graph drains cancels the NIF and removes the partial" do
+    # Six input frames, so the packet loop ends almost at once. `tpad`
+    # emits its 30 000 padded frames only after EOF, so the kill lands in
+    # the filter drain. Without a liveness check there, the NIF keeps
+    # encoding for minutes after the caller is gone.
+    src = Path.join(System.tmp_dir!(), "exmpeg_cancel_drain_src_#{System.unique_integer([:positive])}.mp4")
+    out = Path.join(System.tmp_dir!(), "exmpeg_cancel_drain_out_#{System.unique_integer([:positive])}.mp4")
+
+    on_exit(fn ->
+      File.rm(src)
+      File.rm(out)
+      out |> partials_for() |> Enum.each(&File.rm/1)
+    end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-y -f lavfi -i testsrc2=s=1280x720:r=30:d=0.2 -c:v libx264 -preset ultrafast -pix_fmt yuv420p #{src}),
+        stderr_to_stdout: true,
+        env: %{}
+      )
+
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        send(parent, {:started, self()})
+        Exmpeg.transcode(src, out, video_codec: "libx264", video_filter: "tpad=stop=30000:stop_mode=clone")
+      end)
+
+    assert_receive {:started, ^pid}, 5_000
+    assert eventually(fn -> partials_for(out) != [] end, 10_000)
+
+    # Let the packet loop finish so the NIF is inside the drain.
+    Process.sleep(1_000)
+    Process.exit(pid, :kill)
+
+    assert eventually(fn -> partials_for(out) == [] and not File.exists?(out) end, 2_000)
+  end
+
   defp drain_progress(acc) do
     receive do
       {:exmpeg_progress, msg} -> drain_progress([msg | acc])

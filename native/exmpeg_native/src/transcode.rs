@@ -285,6 +285,7 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
                     &mut output,
                     &out_time_bases,
                     &mut packets_written,
+                    &mut cancel,
                 )?;
             }
             StreamPipeline::Audio { .. } => {
@@ -315,6 +316,7 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
                     &mut output,
                     &out_time_bases,
                     &mut packets_written,
+                    &mut cancel,
                 )?;
             }
             StreamPipeline::Audio { .. } => {
@@ -687,6 +689,7 @@ fn process_video_packet(
     output: &mut AVFormatContextOutput,
     out_time_bases: &[ffi::AVRational],
     packets_written: &mut u64,
+    cancel: &mut CancelGuard,
 ) -> Result<(), NativeError> {
     let StreamPipeline::Video {
         out_idx,
@@ -717,6 +720,7 @@ fn process_video_packet(
             out_time_bases,
             pts,
             packets_written,
+            cancel,
         )?;
     }
 
@@ -732,6 +736,7 @@ fn process_video_packet(
             out_time_bases,
             pts,
             packets_written,
+            cancel,
         )?;
         encoder.send_frame(None)?;
         write_drained_packets(encoder, output, *out_idx, out_time_bases, packets_written)?;
@@ -751,6 +756,10 @@ fn push_video_frame_through_graph(
         .map_err(NativeError::from)
 }
 
+/// Pull every frame the graph has ready and encode it. One input frame
+/// can yield an unbounded number of output frames (`tpad`, `loop`, or
+/// `reverse` at EOF), so the caller's liveness is checked per frame.
+#[allow(clippy::too_many_arguments)]
 fn drain_filter_and_encode(
     graph: &VideoFilterGraph,
     encoder: &mut AVCodecContext,
@@ -759,8 +768,10 @@ fn drain_filter_and_encode(
     out_time_bases: &[ffi::AVRational],
     pts: &mut VideoPts,
     packets_written: &mut u64,
+    cancel: &mut CancelGuard,
 ) -> Result<(), NativeError> {
     loop {
+        cancel.check()?;
         let mut sink = graph
             .graph
             .get_filter(c"out")
