@@ -142,10 +142,10 @@ To build the NIF from source, install Rust 1.98 or newer and set
 ## Runtime requirements (precompiled NIF consumers)
 
 The published Hex package ships precompiled NIF tarballs that **bundle
-the six FFmpeg shared libraries** (`libavformat`, `libavcodec`,
-`libavutil`, `libavfilter`, `libswscale`, `libswresample`) next to the
-NIF and use `$ORIGIN` / `@loader_path` so the loader finds them without
-`LD_LIBRARY_PATH` gymnastics. Consumers therefore do **not** need to
+the seven FFmpeg shared libraries** (`libavformat`, `libavcodec`,
+`libavutil`, `libavfilter`, `libswscale`, `libswresample`, `libavdevice`)
+next to the NIF and use `$ORIGIN` / `@loader_path` so the loader finds
+them without `LD_LIBRARY_PATH` gymnastics. Consumers therefore do **not** need to
 install FFmpeg 8 separately.
 
 The bundled FFmpeg is built **LGPL-only** (`--enable-libmp3lame

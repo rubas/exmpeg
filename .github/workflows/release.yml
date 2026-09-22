@@ -151,8 +151,8 @@ jobs:
         with:
           path: ~/.local/ffmpeg
           # Bump the suffix when the configure flags change, or the cached
-          # prefix hides the change. `v2` drops xlib.
-          key: release-${{ runner.os }}-${{ runner.arch }}-ffmpeg-${{ env.FFMPEG_VERSION }}-lgpl-webp-v2
+          # prefix hides the change. `v3` drops the devices.
+          key: release-${{ runner.os }}-${{ runner.arch }}-ffmpeg-${{ env.FFMPEG_VERSION }}-lgpl-webp-v3
 
       - name: Install build deps (Linux)
         if: runner.os == 'Linux'
@@ -243,7 +243,9 @@ jobs:
           # source (EXMPEG_BUILD=1) against their own GPL FFmpeg.
           # `--disable-xlib`: configure detects the runner's Homebrew
           # libX11 and links it into every library, but no consumer
-          # installs it.
+          # installs it. `--disable-devices`: the NIF opens no capture or
+          # playback device, and devices such as xcbgrab link Homebrew
+          # libraries into libavdevice, which the archive bundles.
           ./configure \
             --prefix="$PREFIX" \
             --disable-static \
@@ -253,6 +255,7 @@ jobs:
             --disable-debug \
             --enable-pic \
             --disable-xlib \
+            --disable-devices \
             --enable-libmp3lame \
             --enable-libopus \
             --enable-libvpx \
@@ -298,9 +301,6 @@ jobs:
         working-directory: native/exmpeg_native
         env:
           TARGET: ${{ matrix.target }}
-          # rusty_ffmpeg links all seven FFmpeg libraries. GNU ld drops the
-          # unused libavdevice as needed; ld64 keeps it unless told to.
-          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: "-C link-arg=-Wl,-dead_strip_dylibs"
         run: |
           cargo build --release --target "$TARGET"
 
@@ -321,13 +321,13 @@ jobs:
           STAGE="$(mktemp -d)"
 
           # Always start fresh: copy the freshly-built NIF, then bundle
-          # the six FFmpeg shared libraries it dlopens (avformat,
-          # avcodec, avutil, avfilter, swscale, swresample). Codec libs
-          # the consumer's distro provides (libmp3lame, libopus, libvpx,
-          # libwebp) are NOT bundled - they're listed as a runtime
-          # requirement in README.md.
+          # the seven FFmpeg shared libraries that rusty_ffmpeg links
+          # (avformat, avcodec, avutil, avfilter, swscale, swresample,
+          # avdevice). Codec libs the consumer's distro provides
+          # (libmp3lame, libopus, libvpx, libwebp) are NOT bundled -
+          # they're listed as a runtime requirement in README.md.
           cp "${SRC_DIR}/${SRC_NAME}" "${STAGE}/${LIB_NAME}"
-          for lib in libavformat libavcodec libavutil libavfilter libswscale libswresample; do
+          for lib in libavformat libavcodec libavutil libavfilter libswscale libswresample libavdevice; do
             # Each FFmpeg shared lib ships as `libname.so.MAJOR.MINOR.PATCH`
             # plus two SONAME symlinks (`libname.so` and
             # `libname.so.MAJOR`). dlopen resolves the SONAME, so we
