@@ -200,11 +200,17 @@ defmodule Exmpeg.IntegrationTest do
         env: %{}
       )
 
-    assert {:ok, stats} = Exmpeg.extract_audio(src, out)
+    assert {:ok, stats} = Exmpeg.extract_audio(src, out, progress: self())
     assert stats.codec == "pcm_s16le"
     assert stats.sample_rate == 44_100
     assert stats.channels == 2
     assert_in_delta stats.duration_s, 2.0, 0.1
+
+    # The WAV demuxer re-chunks on read, so ffprobe cannot count the muxed
+    # packets. A packet count sits between zero and the sample count.
+    last = [] |> drain_progress() |> List.last()
+    assert last.packets_written > 0
+    assert last.packets_written < stats.samples_written
 
     assert {:ok, %MediaInfo{format: format, streams: [audio]}} = Exmpeg.probe(out)
     assert_in_delta format.duration_s, 2.0, 0.1
