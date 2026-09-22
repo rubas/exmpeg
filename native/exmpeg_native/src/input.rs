@@ -62,10 +62,12 @@ impl SharedBytes {
 
 /// Caller-supplied input. `Path` is a regular filesystem path; `Memory`
 /// holds a per-call copy of an in-memory binary; `Buffer` references a
-/// pre-loaded resource that several calls can share.
+/// pre-loaded resource that several calls can share. A clone shares the
+/// bytes, so an operation can open the same source twice without a copy.
+#[derive(Clone)]
 pub(crate) enum InputSource {
     Path(String),
-    Memory(Vec<u8>),
+    Memory(Arc<Vec<u8>>),
     Buffer(ResourceArc<BufferResource>),
 }
 
@@ -85,7 +87,7 @@ impl InputSource {
                         "memory input is an empty binary",
                     ));
                 }
-                open_avio(SharedBytes::Owned(Arc::new(bytes)))
+                open_avio(SharedBytes::Owned(bytes))
             }
             InputSource::Buffer(buf) => {
                 if buf.bytes.is_empty() {
@@ -137,7 +139,7 @@ impl<'a> Decoder<'a> for InputSource {
             return Err(rustler::Error::BadArg);
         };
 
-        Ok(InputSource::Memory(bin.as_slice().to_vec()))
+        Ok(InputSource::Memory(Arc::new(bin.as_slice().to_vec())))
     }
 }
 

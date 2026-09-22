@@ -112,6 +112,35 @@ defmodule Exmpeg.IntegrationTest do
     assert_in_delta audio.duration_s, 1.0, 0.4
   end
 
+  test "remux with duration_s keeps the in-window B-frames and their references like ffmpeg -t -c copy" do
+    # Video decode order is pts 0.0 0.3 0.1 0.2 0.6 0.4 0.5 0.9 0.7 0.8.
+    # A cut at 0.8 s that ended the video on the first out-of-window pts
+    # lost the 0.7 frame (video only), or kept 0.7 without the 0.9
+    # P-frame it references (with audio still in the window).
+    src = Path.join(System.tmp_dir!(), "exmpeg_bframes_#{System.unique_integer([:positive])}.mp4")
+    out = Path.join(System.tmp_dir!(), "exmpeg_bframes_out_#{System.unique_integer([:positive])}.mp4")
+    cli = Path.join(System.tmp_dir!(), "exmpeg_bframes_cli_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out, cli], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=64x48:r=10:d=2 -f lavfi -i sine=frequency=440:duration=2) ++
+          ~w(-c:v libx264 -x264-params bframes=2:b-adapt=0:keyint=30:scenecut=0 -c:a aac #{src}),
+        env: %{}
+      )
+
+    {_, 0} = System.cmd("ffmpeg", ~w(-v error -y -i #{src} -t 0.8 -c copy #{cli}), env: %{})
+    expected = video_packet_pts_times(cli)
+    in_window = src |> video_packet_pts_times() |> Enum.filter(&(&1 < 0.8))
+    assert in_window -- expected == []
+
+    for opts <- [[duration_s: 0.8], [duration_s: 0.8, drop_audio: true]] do
+      assert {:ok, _stats} = Exmpeg.remux(src, out, opts)
+      assert video_packet_pts_times(out) == expected
+    end
+  end
+
   test "remux to an unknown output extension returns :unsupported", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_bad_#{System.unique_integer([:positive])}.xyz")
     on_exit(fn -> File.rm(out) end)
@@ -214,11 +243,17 @@ defmodule Exmpeg.IntegrationTest do
         env: %{}
       )
 
-    assert {:ok, stats} = Exmpeg.extract_audio(src, out)
+    assert {:ok, stats} = Exmpeg.extract_audio(src, out, progress: self())
     assert stats.codec == "pcm_s16le"
     assert stats.sample_rate == 44_100
     assert stats.channels == 2
     assert_in_delta stats.duration_s, 2.0, 0.1
+
+    # The WAV demuxer re-chunks on read, so ffprobe cannot count the muxed
+    # packets. A packet count sits between zero and the sample count.
+    last = [] |> drain_progress() |> List.last()
+    assert last.packets_written > 0
+    assert last.packets_written < stats.samples_written
 
     assert {:ok, %MediaInfo{format: format, streams: [audio]}} = Exmpeg.probe(out)
     assert_in_delta format.duration_s, 2.0, 0.1
@@ -280,6 +315,48 @@ defmodule Exmpeg.IntegrationTest do
 
     gaps = pts |> Enum.chunk_every(2, 1, :discard) |> Enum.map(fn [a, b] -> b - a end)
     assert Enum.all?(gaps, &(&1 > 0.08 and &1 < 0.13))
+  end
+
+  test "concat of MPEG-TS segments with non-zero start times joins them from zero like ffmpeg -f concat" do
+    # `-f segment` MPEG-TS segments keep the running source timestamps:
+    # the first starts near 1.6 s and the second near 3.4 s. Kept as is,
+    # those starts became a lead-in and a hole of about 2 s at the join.
+    dir = Path.join(System.tmp_dir!(), "exmpeg_tscat_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=64x48:r=10:d=4 -f lavfi -i sine=frequency=440:duration=4) ++
+          ~w(-c:v libx264 -g 20 -c:a aac -f segment -segment_time 2 -segment_format mpegts #{dir}/seg%d.ts),
+        env: %{}
+      )
+
+    segments = [seg0, _seg1] = [Path.join(dir, "seg0.ts"), Path.join(dir, "seg1.ts")]
+    assert {:ok, %MediaInfo{format: %{start_time_s: start}}} = Exmpeg.probe(seg0)
+    assert start > 1.0
+
+    list = Path.join(dir, "list.txt")
+    File.write!(list, Enum.map_join(segments, &"file '#{&1}'\n"))
+    cli = Path.join(dir, "cli.mp4")
+    {_, 0} = System.cmd("ffmpeg", ~w(-v error -y -f concat -safe 0 -i #{list} -c copy #{cli}), env: %{})
+
+    out = Path.join(dir, "joined.mp4")
+    assert {:ok, stats} = Exmpeg.concat(segments, out)
+    assert {:ok, %MediaInfo{format: expected}} = Exmpeg.probe(cli)
+    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
+    assert_in_delta stats.duration_s, expected.duration_s, 0.05
+    assert_in_delta format.duration_s, expected.duration_s, 0.05
+
+    pts = video_packet_pts_times(out)
+    expected_pts = video_packet_pts_times(cli)
+    assert length(pts) == length(expected_pts)
+    assert hd(pts) < 0.1
+
+    for {got, want} <- Enum.zip(pts, expected_pts) do
+      assert_in_delta got, want, 0.01
+    end
   end
 
   test "transcode re-encodes both streams with libx264 + aac", %{clip: clip} do
@@ -764,10 +841,81 @@ defmodule Exmpeg.IntegrationTest do
     out = Path.join(System.tmp_dir!(), "exmpeg_concat_bad_#{System.unique_integer([:positive])}.mp4")
     on_exit(fn -> File.rm(out) end)
 
-    assert {:error, %Exmpeg.Error{reason: :invalid_request, message: msg}} =
+    assert {:error, %Exmpeg.Error{reason: :invalid_request, message: msg, details: %{"field" => "stream_count"}}} =
              Exmpeg.concat([clip, video_only], out)
 
     assert msg =~ "stream"
+  end
+
+  test "concat rejects inputs whose codec parameters differ and names the stream and field" do
+    dir = Path.join(System.tmp_dir!(), "exmpeg_concat_params_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    fixture = fn name, args ->
+      path = Path.join(dir, name)
+      {_, 0} = System.cmd("ffmpeg", ~w(-v error -y) ++ args ++ ~w(#{path}), env: %{})
+      path
+    end
+
+    sine = &~w(-f lavfi -i sine=frequency=440:duration=1:sample_rate=#{&1} -ac #{&2} -c:a pcm_s16le)
+    video = &~w(-f lavfi -i testsrc2=s=64x48:r=10:d=1 -c:v libx264 -profile:v #{&1} -pix_fmt yuv420p)
+    mono_44k = fixture.("mono_44k.wav", sine.(44_100, 1))
+    mono_48k = fixture.("mono_48k.wav", sine.(48_000, 1))
+    stereo_48k = fixture.("stereo_48k.wav", sine.(48_000, 2))
+    high = fixture.("high.mp4", video.("high"))
+    baseline = fixture.("baseline.mp4", video.("baseline"))
+    high_cavlc = fixture.("high_cavlc.mp4", video.("high") ++ ~w(-x264-params cabac=0))
+
+    out = Path.join(dir, "joined.wav")
+    File.write!(out, "existing")
+
+    for {inputs, out, field} <- [
+          {[mono_44k, mono_48k], out, "sample_rate"},
+          {[mono_48k, stereo_48k], out, "channel_layout"},
+          {[high, baseline], Path.join(dir, "joined.mp4"), "profile"},
+          {[high, high_cavlc], Path.join(dir, "joined.mp4"), "extradata"}
+        ] do
+      assert {:error, %Exmpeg.Error{reason: :invalid_request, details: %{"stream" => "0", "field" => ^field}}} =
+               Exmpeg.concat(inputs, out)
+    end
+
+    assert File.read!(out) == "existing"
+  end
+
+  test "concat joins inputs whose layout order or unprobed parameters are the only difference" do
+    dir = Path.join(System.tmp_dir!(), "exmpeg_concat_unknown_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    fixture = fn name, args ->
+      path = Path.join(dir, name)
+      {_, 0} = System.cmd("ffmpeg", ~w(-v error -y) ++ args ++ ~w(#{path}), env: %{})
+      path
+    end
+
+    # A plain WAV header carries only a channel count; the MOV `chan`
+    # atom names the stereo layout.
+    sine = ~w(-f lavfi -i sine=frequency=440:duration=1:sample_rate=48000 -ac 2 -c:a pcm_s16le)
+    unspecified = fixture.("unspecified.wav", sine)
+    stereo = fixture.("stereo.mov", sine)
+
+    # A TS cut inside a 10 s GOP leaves no SPS in the second part's probe
+    # window, so its profile, size, and pixel format stay unset.
+    long = fixture.("long.ts", ~w(-f lavfi -i testsrc2=s=64x48:r=10:d=10 -c:v libx264 -g 100))
+    bytes = File.read!(long)
+    cut = 188 * div(byte_size(bytes), 376)
+    part_a = Path.join(dir, "part_a.ts")
+    part_b = Path.join(dir, "part_b.ts")
+    File.write!(part_a, binary_part(bytes, 0, cut))
+    File.write!(part_b, binary_part(bytes, cut, byte_size(bytes) - cut))
+
+    for {inputs, out} <- [
+          {[unspecified, stereo], Path.join(dir, "joined.wav")},
+          {[part_a, part_b], Path.join(dir, "joined.mp4")}
+        ] do
+      assert {:ok, %{inputs_joined: 2}} = Exmpeg.concat(inputs, out)
+    end
   end
 
   test "probe accepts {:memory, binary} input", %{clip: clip} do
@@ -908,8 +1056,10 @@ defmodule Exmpeg.IntegrationTest do
     assert last.current_pts_s > 1.5
   end
 
-  test "extract_audio emits progress messages", %{clip: clip} do
-    out = Path.join(System.tmp_dir!(), "exmpeg_audio_progress_#{System.unique_integer([:positive])}.wav")
+  test "extract_audio progress counts muxed packets, not samples", %{clip: clip} do
+    # m4a keeps one sample entry per muxed packet, so ffprobe reads back
+    # the exact count. The WAV demuxer re-chunks on read and would not.
+    out = Path.join(System.tmp_dir!(), "exmpeg_audio_progress_#{System.unique_integer([:positive])}.m4a")
     on_exit(fn -> File.rm(out) end)
 
     parent = self()
@@ -919,13 +1069,15 @@ defmodule Exmpeg.IntegrationTest do
         Exmpeg.extract_audio(clip, out, progress: parent)
       end)
 
-    {:ok, _stats} = Task.await(task, 60_000)
+    {:ok, stats} = Task.await(task, 60_000)
 
     msgs = drain_progress([])
     assert msgs != [], "expected at least one progress message"
     last = List.last(msgs)
     assert last.op == "extract_audio"
     assert last.total_duration_s > 1.5
+    assert last.packets_written == audio_packet_count(out)
+    assert last.packets_written < stats.samples_written
   end
 
   test "concat accepts memory inputs and emits progress", %{clip: clip} do
@@ -1034,6 +1186,29 @@ defmodule Exmpeg.IntegrationTest do
       end
     end)
     |> Enum.sort()
+  end
+
+  # Number of audio packets in a file, read via ffprobe.
+  defp audio_packet_count(path) do
+    {out, 0} =
+      System.cmd(
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-count_packets",
+          "-select_streams",
+          "a:0",
+          "-show_entries",
+          "stream=nb_read_packets",
+          "-of",
+          "csv=p=0",
+          path
+        ],
+        env: %{}
+      )
+
+    out |> String.trim() |> String.to_integer()
   end
 
   test "killing the caller mid-transcode cancels the NIF and removes the partial" do

@@ -35,11 +35,10 @@ const MIN_INTERVAL: Duration = Duration::from_millis(100);
 /// stats so subscribers can render the same UI for any op.
 #[derive(Debug, Clone, NifMap)]
 pub(crate) struct ProgressUpdate {
-    /// What this NIF is doing - `"probe"`, `"remux"`, `"transcode"`,
-    /// `"extract_audio"`, `"extract_frame"`, `"concat"`.
+    /// What this NIF is doing - `"remux"`, `"transcode"`,
+    /// `"extract_audio"`, `"concat"`.
     pub(crate) op: String,
-    /// Packets handed to the muxer so far (or decoded for ops without
-    /// a writable output, e.g. probe).
+    /// Packets handed to the muxer so far.
     pub(crate) packets_written: u64,
     /// Current output PTS in seconds. `0.0` when unknown.
     pub(crate) current_pts_s: f64,
