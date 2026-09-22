@@ -52,10 +52,20 @@ jobs:
           TRIGGER_SHA: ${{ github.sha }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Build the tagged commit, not the branch the run started from.
             TAG="$INPUT_TAG"
-            VERSION="${TAG#v}"
+            if ! SHA="$(git rev-parse -q --verify "refs/tags/$TAG^{commit}")"; then
+              echo "Tag $TAG does not exist" >&2
+              exit 1
+            fi
+            VERSION="$(git show "$SHA:mix.exs" | sed -n 's/^  @version "\([^"]*\)"$/\1/p' | head -n1)"
+            if [ "$TAG" != "v$VERSION" ]; then
+              echo "Tag $TAG has mix.exs version $VERSION" >&2
+              exit 1
+            fi
             SHOULD_RELEASE=true
           else
+            SHA="$TRIGGER_SHA"
             VERSION="$(sed -n 's/^  @version "\([^"]*\)"$/\1/p' mix.exs | head -n1)"
             # A root commit (e.g. after a squashed history) has no parent,
             # so `git show HEAD^` would fail under `set -e`. Treat a missing
@@ -96,8 +106,8 @@ jobs:
             SHOULD_RELEASE=false
           fi
 
-          NIF_VERSION="$(sed -n 's/^[[:space:]]*nif_versions:[[:space:]]*\["\([^"]*\)"\].*$/\1/p' \
-            lib/exmpeg/native.ex | head -n1)"
+          NIF_VERSION="$(git show "$SHA:lib/exmpeg/native.ex" \
+            | sed -n 's/^[[:space:]]*nif_versions:[[:space:]]*\["\([^"]*\)"\].*$/\1/p' | head -n1)"
           if [ -z "$NIF_VERSION" ]; then
             echo "Failed to parse nif_versions from lib/exmpeg/native.ex" >&2
             exit 1
@@ -107,7 +117,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag_exists=$TAG_EXISTS" >> "$GITHUB_OUTPUT"
-          echo "sha=$TRIGGER_SHA" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "nif_version=$NIF_VERSION" >> "$GITHUB_OUTPUT"
 
   build:

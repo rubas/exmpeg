@@ -118,16 +118,23 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
 
 ## Manual / out-of-band release
 
-To rebuild artefacts without bumping `@version`, trigger the workflow
+To rebuild the artefacts of an existing tag, trigger the workflow
 manually:
 
 ```bash
 gh workflow run release.yml -f tag=v0.1.1
 ```
 
-It will build for the tag-derived version, replace the existing release
-artefacts (if any), and re-tag if the tag doesn't already exist. Then
-follow steps 3 and 4 above.
+The run builds the commit the tag points at, with the workflow file of
+the branch it started from. It fails before any build when the tag does
+not exist or when the tagged `mix.exs` has a different `@version`. It
+replaces the existing release artefacts. Then follow steps 3 and 4
+above.
+
+A rebuild never reproduces the old tarballs byte for byte, so their
+checksums change. Rebuild only a version that is not on Hex yet, for
+example after a failed release run. Consumers of a published version
+verify the tarballs against the checksum file in its Hex package.
 
 ## When something goes wrong
 
