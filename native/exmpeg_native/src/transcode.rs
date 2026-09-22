@@ -86,27 +86,6 @@ struct VideoFilterGraph {
     graph: AVFilterGraph,
 }
 
-/// Running output pts for re-encoded video, in the encoder time_base.
-/// Each filtered frame is stamped with `next` which then advances by
-/// `step` (one frame interval). For the default `fps=N/D` chain `step`
-/// is exactly 1 (encoder tb is `1/fps`); for a custom `:video_filter`
-/// without an `fps` filter the sink keeps the input stream time_base, so
-/// `step` is the rescaled frame duration and the output keeps real
-/// timing instead of collapsing to consecutive integers.
-struct VideoPts {
-    next: i64,
-    step: i64,
-}
-
-impl VideoPts {
-    /// Return the pts for the current frame and advance by one interval.
-    fn advance(&mut self) -> i64 {
-        let pts = self.next;
-        self.next += self.step;
-        pts
-    }
-}
-
 enum StreamPipeline {
     Copy {
         in_idx: usize,
@@ -119,7 +98,6 @@ enum StreamPipeline {
         decoder: AVCodecContext,
         encoder: AVCodecContext,
         graph: VideoFilterGraph,
-        pts: VideoPts,
     },
     Audio {
         in_idx: usize,
@@ -259,13 +237,11 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
         ProgressEmitter::from_av_duration(env, opts.progress, "transcode", input.duration);
     let mut cancel = CancelGuard::new(env);
 
-    // Re-encoded streams get zero-based timestamps (the audio sample
-    // counter and the video pts cursor both start at 0). Copied streams
-    // would otherwise keep their source timestamps, which for a source
-    // that does not start at 0 (MPEG-TS captures, edit-list offsets)
-    // leaves a constant A/V desync equal to the container start time.
-    // Normalise the whole output to a zero origin by subtracting the
-    // container start time from copied packets too.
+    // Every packet is shifted by the container start time before it is
+    // copied or decoded, so a source that does not start at 0 (MPEG-TS
+    // captures, edit-list offsets) lands on a zero origin while the
+    // streams keep their offsets against each other. The re-encoded
+    // audio sample counter still starts at 0.
     let input_start_time = input.start_time;
 
     while let Some(packet) = input.read_packet()? {
@@ -282,17 +258,18 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
             continue;
         };
 
+        let mut packet = packet;
+        if let Some(start) = start_offset_in_tb(input_start_time, in_tb) {
+            if packet.pts != ffi::AV_NOPTS_VALUE {
+                packet.set_pts(packet.pts - start);
+            }
+            if packet.dts != ffi::AV_NOPTS_VALUE {
+                packet.set_dts(packet.dts - start);
+            }
+        }
+
         match pipeline {
             StreamPipeline::Copy { out_idx, in_tb, .. } => {
-                let mut packet = packet;
-                if let Some(start) = start_offset_in_tb(input_start_time, *in_tb) {
-                    if packet.pts != ffi::AV_NOPTS_VALUE {
-                        packet.set_pts(packet.pts - start);
-                    }
-                    if packet.dts != ffi::AV_NOPTS_VALUE {
-                        packet.set_dts(packet.dts - start);
-                    }
-                }
                 packet.rescale_ts(*in_tb, out_time_bases[*out_idx as usize]);
                 packet.set_stream_index(*out_idx);
                 output.interleaved_write_frame(&mut packet)?;
@@ -427,7 +404,7 @@ fn build_video_pipeline(
     let fps = opts.fps.unwrap_or(src_fps);
 
     let filter_spec = build_video_filter_spec(opts, heuristic_w, heuristic_h, fps, dst_fmt);
-    let graph = build_video_graph(src_w, src_h, src_fmt, in_tb, src_sar, dst_fmt, &filter_spec)?;
+    let graph = build_video_graph(src_w, src_h, src_fmt, in_tb, src_sar, src_fps, &filter_spec)?;
 
     // Use the post-config buffersink dimensions / pix_fmt / sample aspect
     // ratio to drive the encoder. This makes the user's `:video_filter`
@@ -440,11 +417,9 @@ fn build_video_pipeline(
             .ok_or_else(|| NativeError::new("runtime_error", "buffersink missing after config"))?;
         let tb = sink.get_time_base();
         let fr = sink.get_frame_rate();
-        // The default chain ends in `fps=N/D`, so only a custom
-        // `:video_filter` leaves the sink rate unknown. That chain
-        // overrides `:fps`, so its cadence is the source rate: a crop-only
-        // filter on a 10 fps input with `fps: {60, 1}` must not be stamped
-        // at 1/60 s intervals.
+        // The encoder's rate-control hint. A custom `:video_filter` can
+        // leave the sink rate unknown; it overrides `:fps`, so fall back
+        // to the source rate, not the ignored `:fps`.
         let frame_rate = if fr.den == 0 || fr.num == 0 {
             ffi::AVRational {
                 num: src_fps.0,
@@ -478,24 +453,6 @@ fn build_video_pipeline(
     }
     encoder.open(None)?;
 
-    // One frame interval expressed in the encoder time_base. The drain
-    // loop re-times every filtered frame to a consecutive multiple of
-    // this step. `av_rescale_q(1, 1/frame_rate, out_tb)` is exactly 1 for
-    // the default `fps=N/D` chain (out_tb is `1/fps`), but for a custom
-    // `:video_filter` without an `fps` filter the sink keeps the input
-    // stream time_base, where one frame spans many ticks - stepping by a
-    // bare 1 there collapses the output to a few microseconds. Clamp to
-    // at least 1 so a degenerate frame_rate can never stall pts.
-    let inv_frame_rate = ffi::AVRational {
-        num: out_frame_rate.den,
-        den: out_frame_rate.num,
-    };
-    let pts_step = av_rescale_q(1, inv_frame_rate, out_tb).max(1);
-    let pts = VideoPts {
-        next: 0,
-        step: pts_step,
-    };
-
     let out_idx;
     {
         let mut out_stream = output.new_stream();
@@ -513,7 +470,6 @@ fn build_video_pipeline(
         decoder,
         encoder,
         graph,
-        pts,
     })
 }
 
@@ -550,7 +506,7 @@ fn build_video_graph(
     src_fmt: i32,
     src_tb: ffi::AVRational,
     src_sar: ffi::AVRational,
-    _dst_fmt: i32,
+    src_fps: (i32, i32),
     filter_spec: &str,
 ) -> Result<VideoFilterGraph, NativeError> {
     let graph = AVFilterGraph::new();
@@ -562,9 +518,11 @@ fn build_video_graph(
 
     let sar_num = if src_sar.num == 0 { 1 } else { src_sar.num };
     let sar_den = if src_sar.den == 0 { 1 } else { src_sar.den };
+    // The frame rate lets filters that create frames (`tpad`, `loop`)
+    // space them; the graph keeps every timestamp it is given.
     let buffer_args = CString::new(format!(
-        "video_size={src_w}x{src_h}:pix_fmt={src_fmt}:time_base={}/{}:pixel_aspect={sar_num}/{sar_den}",
-        src_tb.num, src_tb.den
+        "video_size={src_w}x{src_h}:pix_fmt={src_fmt}:time_base={}/{}:pixel_aspect={sar_num}/{sar_den}:frame_rate={}/{}",
+        src_tb.num, src_tb.den, src_fps.0, src_fps.1
     ))
     .map_err(|_| {
         NativeError::new("runtime_error", "buffersrc args could not be encoded as a C string")
@@ -714,7 +672,6 @@ fn process_video_packet(
         decoder,
         encoder,
         graph,
-        pts,
         ..
     } = pipeline
     else {
@@ -723,11 +680,16 @@ fn process_video_packet(
 
     decoder.send_packet(packet)?;
     loop {
-        let frame = match decoder.receive_frame() {
+        let mut frame = match decoder.receive_frame() {
             Ok(f) => f,
             Err(RsmpegError::DecoderDrainError | RsmpegError::DecoderFlushedError) => break,
             Err(err) => return Err(err.into()),
         };
+        // The frame carries the packet pts, which a source with only dts
+        // leaves unset. The graph and the encoder keep the timestamps the
+        // frame enters with, so use the decoder's best guess, as the
+        // ffmpeg CLI does.
+        frame.set_pts(frame.best_effort_timestamp);
 
         push_video_frame_through_graph(graph, Some(&frame))?;
         drain_filter_and_encode(
@@ -736,7 +698,6 @@ fn process_video_packet(
             output,
             *out_idx,
             out_time_bases,
-            pts,
             packets_written,
             cancel,
         )?;
@@ -752,7 +713,6 @@ fn process_video_packet(
             output,
             *out_idx,
             out_time_bases,
-            pts,
             packets_written,
             cancel,
         )?;
@@ -774,17 +734,17 @@ fn push_video_frame_through_graph(
         .map_err(NativeError::from)
 }
 
-/// Pull every frame the graph has ready and encode it. One input frame
-/// can yield an unbounded number of output frames (`tpad`, `loop`, or
-/// `reverse` at EOF), so the caller's liveness is checked per frame.
-#[allow(clippy::too_many_arguments)]
+/// Pull every frame the graph has ready and encode it with the timestamp
+/// the graph gave it; the encoder time_base is the sink time_base. One
+/// input frame can yield an unbounded number of output frames (`tpad`,
+/// `loop`, or `reverse` at EOF), so the caller's liveness is checked per
+/// frame.
 fn drain_filter_and_encode(
     graph: &VideoFilterGraph,
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
     out_idx: i32,
     out_time_bases: &[ffi::AVRational],
-    pts: &mut VideoPts,
     packets_written: &mut u64,
     cancel: &mut CancelGuard,
 ) -> Result<(), NativeError> {
@@ -794,17 +754,13 @@ fn drain_filter_and_encode(
             .graph
             .get_filter(c"out")
             .ok_or_else(|| NativeError::new("runtime_error", "buffersink context vanished"))?;
-        let mut filtered = match sink.buffersink_get_frame(None) {
+        let filtered = match sink.buffersink_get_frame(None) {
             Ok(f) => f,
             Err(RsmpegError::BufferSinkDrainError | RsmpegError::BufferSinkEofError) => {
                 return Ok(());
             }
             Err(err) => return Err(err.into()),
         };
-
-        // Re-time to a monotonically-increasing pts in the encoder's
-        // time_base, stepping by one frame interval (see `VideoPts`).
-        filtered.set_pts(pts.advance());
 
         encoder.send_frame(Some(&filtered))?;
         write_drained_packets(encoder, output, out_idx, out_time_bases, packets_written)?;

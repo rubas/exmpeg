@@ -446,16 +446,15 @@ defmodule Exmpeg.IntegrationTest do
     assert video.video.height < 60
 
     # A custom :video_filter chain with no fps filter keeps the input
-    # stream time_base on the buffersink. Stepping pts by a bare 1 there
-    # collapses the output to a few microseconds; stepping by one frame
-    # interval keeps the real ~2 s duration.
+    # stream time_base on the buffersink, and the frames keep their ~2 s
+    # of timestamps.
     assert format.duration_s > 1.5 and format.duration_s < 2.5
   end
 
   test "transcode :video_filter ignores an overridden :fps for pts timing", %{clip: clip} do
-    # `:video_filter` overrides `:fps`, so the pts step must come from the
-    # source cadence, not the ignored `:fps`. With the bug, a high `:fps`
-    # stamped frames too close together and compressed the duration.
+    # `:video_filter` overrides `:fps`, so the ignored `:fps` must not
+    # change the timing. A high `:fps` once stamped frames too close
+    # together and compressed the duration.
     out = Path.join(System.tmp_dir!(), "exmpeg_xc6_#{System.unique_integer([:positive])}.mp4")
     on_exit(fn -> File.rm(out) end)
 
@@ -468,6 +467,36 @@ defmodule Exmpeg.IntegrationTest do
 
     assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
     assert format.duration_s > 1.5 and format.duration_s < 2.5
+  end
+
+  test "transcode :video_filter keeps the timestamps the filter graph produces", %{clip: clip} do
+    # The frames were restamped at a fixed cadence, which undid setpts and
+    # flattened the gaps of a variable-frame-rate source.
+    vfr = Path.join(System.tmp_dir!(), "exmpeg_vfr_#{System.unique_integer([:positive])}.mp4")
+    outs = for _ <- 1..2, do: Path.join(System.tmp_dir!(), "exmpeg_vf_ts_#{System.unique_integer([:positive])}.mp4")
+    [slow, cropped] = outs
+    on_exit(fn -> Enum.each([vfr | outs], &File.rm/1) end)
+
+    assert {:ok, _} = Exmpeg.transcode(clip, slow, video_codec: "libx264", video_filter: "setpts=2*PTS")
+    assert_in_delta slow |> video_packet_pts_times() |> List.last(), 3.8, 0.01
+
+    # Ten frames 50 ms apart, then ten frames 150 ms apart.
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=10:d=2 -vf) ++
+          ["settb=1/1000,setpts='if(lt(N,10),N*0.05,0.5+(N-10)*0.15)/TB'"] ++
+          ~w(-fps_mode passthrough -enc_time_base 1/1000 -c:v libx264 -bf 0 #{vfr}),
+        env: %{}
+      )
+
+    assert {:ok, _} = Exmpeg.transcode(vfr, cropped, video_codec: "libx264", video_filter: "crop=iw:ih-20:0:10")
+
+    src_pts = video_packet_pts_times(vfr)
+    out_pts = video_packet_pts_times(cropped)
+    assert length(src_pts) == 20 and length(out_pts) == 20
+    assert_in_delta List.last(src_pts), 1.85, 0.002
+    Enum.zip_with(src_pts, out_pts, &assert_in_delta(&1, &2, 0.002))
   end
 
   test "transcode keeps a 10 fps rate that only the container carries" do
