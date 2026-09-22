@@ -5,17 +5,17 @@
 //! Replaces `ffmpeg -ss T -i in -frames:v 1 out.jpg`. Built entirely on
 //! rsmpeg's safe wrappers — no `unsafe` in this module.
 
-use std::ffi::CString;
 use std::path::Path;
 
 use rsmpeg::avcodec::{AVCodec, AVCodecContext};
 use rsmpeg::avformat::{AVFormatContextInput, AVFormatContextOutput};
-use rsmpeg::avutil::{AVDictionary, AVFrame};
+use rsmpeg::avutil::{AVDictionary, AVFrame, av_mul_q, ra};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 use rsmpeg::swscale::SwsContext;
 use rustler::{Env, NifMap};
 
+use crate::atomic_output;
 use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 
@@ -54,7 +54,7 @@ pub(crate) fn extract_frame<Q: AsRef<Path>>(
     opts: &ExtractFrameOpts,
 ) -> Result<ExtractFrameStats, NativeError> {
     let output_path = output_path.as_ref();
-    let out_url = to_cstring(output_path)?;
+    let out_url = atomic_output::to_cstring(output_path)?;
 
     let mut input = source.open()?;
     let mut cancel = CancelGuard::new(env);
@@ -66,6 +66,7 @@ pub(crate) fn extract_frame<Q: AsRef<Path>>(
     // so collapsing it into this scope keeps the codecpar reference
     // off the stack afterwards.
     let stream_time_base = input.streams()[video_index].time_base;
+    let stream_sar = input.streams()[video_index].sample_aspect_ratio;
     let mut decoder = AVCodecContext::new(&decoder_codec);
     {
         let codecpar = input.streams()[video_index].codecpar();
@@ -121,6 +122,8 @@ pub(crate) fn extract_frame<Q: AsRef<Path>>(
     // strictness returns AVERROR(EINVAL). `FF_COMPLIANCE_UNOFFICIAL`
     // matches what the `ffmpeg` CLI does by default for image output.
     encoder.set_strict_std_compliance(ffi::FF_COMPLIANCE_UNOFFICIAL);
+    // Keep the source display aspect ratio in the JFIF density or PNG pHYs.
+    encoder.set_sample_aspect_ratio(output_sar(stream_sar, &decoder, target_w, target_h));
     encoder.open(None)?;
 
     let mut output = AVFormatContextOutput::create(&out_url)?;
@@ -178,6 +181,28 @@ pub(crate) fn extract_frame<Q: AsRef<Path>>(
         pts_known,
         codec: codec_name,
     })
+}
+
+/// Sample aspect ratio of the still image. The container SAR wins over
+/// the bitstream one, as in `av_guess_sample_aspect_ratio`. A resize that
+/// is not proportional changes the pixel shape, so the scale factors fold
+/// into the SAR the way the `scale` filter does and the display aspect
+/// ratio stays. An unknown SAR (0/1) stays unknown.
+fn output_sar(
+    stream_sar: ffi::AVRational,
+    decoder: &AVCodecContext,
+    target_w: i32,
+    target_h: i32,
+) -> ffi::AVRational {
+    let src_sar = if stream_sar.num > 0 {
+        stream_sar
+    } else {
+        decoder.sample_aspect_ratio
+    };
+    av_mul_q(
+        av_mul_q(src_sar, ra(decoder.width, target_w)),
+        ra(target_h, decoder.height),
+    )
 }
 
 fn find_video_stream(
@@ -387,11 +412,4 @@ fn scale_frame(
     sws.scale_frame(&src, 0, src_h, &mut dst)?;
     dst.set_pts(src.pts);
     Ok(dst)
-}
-
-fn to_cstring(path: &Path) -> Result<CString, NativeError> {
-    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
-    })
 }

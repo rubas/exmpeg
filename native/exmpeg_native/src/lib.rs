@@ -158,7 +158,7 @@ fn nif_concat(
 ) -> Term<'_> {
     let result = run_with_panic_protection(|| {
         atomic_output::run(&output, |partial| {
-            concat::concat(env, sources, partial, &opts)
+            concat::concat(env, &sources, partial, &opts)
         })
     });
     encode_result(env, result)

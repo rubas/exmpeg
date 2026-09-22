@@ -17,6 +17,7 @@ use rsmpeg::swresample::SwrContext;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::atomic_output;
 use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
@@ -66,7 +67,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
         .map(str::to_ascii_lowercase);
     let encoder_codec = pick_encoder(ext.as_deref())?;
 
-    let out_url = to_cstring(output_path)?;
+    let out_url = atomic_output::to_cstring(output_path)?;
 
     let mut input = source.open()?;
     let (audio_index, decoder_codec) = find_audio_stream(&input)?;
@@ -81,14 +82,15 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     decoder.open(None)?;
 
     let target_rate = pick_sample_rate(&encoder_codec, opts.sample_rate, decoder.sample_rate);
-    let target_channels = resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
+    let target_channels =
+        crate::audio::resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
     let target_layout = AVChannelLayout::from_nb_channels(target_channels);
-    let target_fmt = pick_sample_fmt(&encoder_codec, decoder.sample_fmt);
+    let target_fmt = crate::audio::pick_sample_fmt(&encoder_codec, decoder.sample_fmt);
 
     let mut encoder = AVCodecContext::new(&encoder_codec);
     encoder.set_sample_rate(target_rate);
     encoder.set_sample_fmt(target_fmt);
-    encoder.set_ch_layout(target_layout.clone().into_inner());
+    encoder.set_ch_layout(ffi_helpers::copy_ch_layout(&target_layout)?);
     encoder.set_time_base(ffi::AVRational {
         num: 1,
         den: target_rate,
@@ -166,6 +168,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     };
 
     let mut samples_written: u64 = 0;
+    let mut packets_written: u64 = 0;
     let mut progress =
         ProgressEmitter::from_av_duration(env, opts.progress, "extract_audio", input.duration);
     let mut cancel = CancelGuard::new(env);
@@ -185,8 +188,12 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             };
 
             if let (Some(swr), Some(fifo)) = (swr.as_mut(), fifo.as_mut()) {
-                let mut resampled =
-                    alloc_resample_frame(&frame, &target_layout, target_fmt, target_rate)?;
+                let mut resampled = crate::audio::alloc_resample_frame(
+                    &frame,
+                    &target_layout,
+                    target_fmt,
+                    target_rate,
+                )?;
                 swr.convert_frame(Some(&frame), &mut resampled)?;
                 if resampled.nb_samples > 0 {
                     ffi_helpers::write_fifo_frame(fifo, &resampled)?;
@@ -198,6 +205,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
                     target_rate,
                     &target_layout,
                     &mut samples_written,
+                    &mut packets_written,
                     &mut encoder,
                     &mut output,
                     out_tb,
@@ -207,13 +215,14 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
                 encode_pcm_frame(
                     frame,
                     &mut samples_written,
+                    &mut packets_written,
                     &mut encoder,
                     &mut output,
                     out_tb,
                 )?;
             }
             progress.tick(
-                samples_written,
+                packets_written,
                 samples_written as f64 / f64::from(target_rate),
             );
         }
@@ -242,8 +251,12 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             Err(err) => return Err(err.into()),
         };
         if let (Some(swr), Some(fifo)) = (swr.as_mut(), fifo.as_mut()) {
-            let mut resampled =
-                alloc_resample_frame(&frame, &target_layout, target_fmt, target_rate)?;
+            let mut resampled = crate::audio::alloc_resample_frame(
+                &frame,
+                &target_layout,
+                target_fmt,
+                target_rate,
+            )?;
             swr.convert_frame(Some(&frame), &mut resampled)?;
             if resampled.nb_samples > 0 {
                 ffi_helpers::write_fifo_frame(fifo, &resampled)?;
@@ -255,6 +268,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
                 target_rate,
                 &target_layout,
                 &mut samples_written,
+                &mut packets_written,
                 &mut encoder,
                 &mut output,
                 out_tb,
@@ -264,6 +278,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             encode_pcm_frame(
                 frame,
                 &mut samples_written,
+                &mut packets_written,
                 &mut encoder,
                 &mut output,
                 out_tb,
@@ -276,7 +291,8 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     // buffered between the decoder and the encoder.
     if let (Some(swr), Some(fifo)) = (swr.as_mut(), fifo.as_mut()) {
         loop {
-            let mut tail = empty_resample_frame(&target_layout, target_fmt, target_rate)?;
+            let mut tail =
+                crate::audio::empty_resample_frame(&target_layout, target_fmt, target_rate)?;
             swr.convert_frame(None, &mut tail)?;
             if tail.nb_samples == 0 {
                 break;
@@ -290,6 +306,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             target_rate,
             &target_layout,
             &mut samples_written,
+            &mut packets_written,
             &mut encoder,
             &mut output,
             out_tb,
@@ -298,12 +315,12 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     }
 
     encoder.send_frame(None)?;
-    write_drained_packets(&mut encoder, &mut output, out_tb)?;
+    write_drained_packets(&mut encoder, &mut output, out_tb, &mut packets_written)?;
 
     output.write_trailer()?;
 
     let duration_s = samples_written as f64 / f64::from(target_rate);
-    progress.finish(samples_written, duration_s);
+    progress.finish(packets_written, duration_s);
 
     Ok(ExtractAudioStats {
         sample_rate: target_rate,
@@ -340,18 +357,6 @@ fn pick_encoder(ext: Option<&str>) -> Result<AVCodecRef<'static>, NativeError> {
     })
 }
 
-fn pick_sample_fmt(codec: &AVCodecRef<'static>, src: i32) -> i32 {
-    if let Some(fmts) = codec.sample_fmts() {
-        if fmts.contains(&src) {
-            return src;
-        }
-        if let Some(first) = fmts.first() {
-            return *first;
-        }
-    }
-    src
-}
-
 fn pick_sample_rate(codec: &AVCodecRef<'static>, requested: Option<i32>, src: i32) -> i32 {
     let candidate = requested.unwrap_or(src).max(1);
     if let Some(rates) = codec.supported_samplerates() {
@@ -377,6 +382,7 @@ fn drain_fifo(
     sample_rate: i32,
     layout: &AVChannelLayout,
     samples_written: &mut u64,
+    packets_written: &mut u64,
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
     out_tb: ffi::AVRational,
@@ -399,7 +405,7 @@ fn drain_fifo(
         frame.set_nb_samples(take);
         frame.set_sample_rate(sample_rate);
         frame.set_format(fmt);
-        frame.set_ch_layout(layout.clone().into_inner());
+        frame.set_ch_layout(ffi_helpers::copy_ch_layout(layout)?);
         frame.get_buffer(0)?;
         let read = ffi_helpers::read_fifo_into_frame(fifo, &mut frame, take)?;
         if read != take {
@@ -411,7 +417,7 @@ fn drain_fifo(
         *samples_written += u64::try_from(read).unwrap_or(0);
 
         encoder.send_frame(Some(&frame))?;
-        write_drained_packets(encoder, output, out_tb)?;
+        write_drained_packets(encoder, output, out_tb, packets_written)?;
     }
 }
 
@@ -421,6 +427,7 @@ fn drain_fifo(
 fn encode_pcm_frame(
     mut frame: AVFrame,
     samples_written: &mut u64,
+    packets_written: &mut u64,
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
     out_tb: ffi::AVRational,
@@ -428,7 +435,7 @@ fn encode_pcm_frame(
     frame.set_pts(*samples_written as i64);
     *samples_written += u64::try_from(frame.nb_samples).unwrap_or(0);
     encoder.send_frame(Some(&frame))?;
-    write_drained_packets(encoder, output, out_tb)?;
+    write_drained_packets(encoder, output, out_tb, packets_written)?;
     Ok(())
 }
 
@@ -436,6 +443,7 @@ fn write_drained_packets(
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
     out_tb: ffi::AVRational,
+    packets_written: &mut u64,
 ) -> Result<(), NativeError> {
     let enc_tb = encoder.time_base;
     loop {
@@ -447,84 +455,13 @@ fn write_drained_packets(
                 // chosen stream time_base before writing.
                 packet.rescale_ts(enc_tb, out_tb);
                 output.interleaved_write_frame(&mut packet)?;
+                *packets_written += 1;
             }
             Err(RsmpegError::EncoderDrainError | RsmpegError::EncoderFlushedError) => break,
             Err(err) => return Err(err.into()),
         }
     }
     Ok(())
-}
-
-fn alloc_resample_frame(
-    src: &AVFrame,
-    layout: &AVChannelLayout,
-    fmt: i32,
-    sample_rate: i32,
-) -> Result<AVFrame, NativeError> {
-    let nb_samples = compute_resample_capacity(src.nb_samples, src.sample_rate, sample_rate);
-    let mut dst = AVFrame::new();
-    dst.set_nb_samples(nb_samples);
-    dst.set_sample_rate(sample_rate);
-    dst.set_format(fmt);
-    dst.set_ch_layout(layout.clone().into_inner());
-    dst.get_buffer(0)?;
-    Ok(dst)
-}
-
-fn empty_resample_frame(
-    layout: &AVChannelLayout,
-    fmt: i32,
-    sample_rate: i32,
-) -> Result<AVFrame, NativeError> {
-    let mut dst = AVFrame::new();
-    dst.set_nb_samples(4096);
-    dst.set_sample_rate(sample_rate);
-    dst.set_format(fmt);
-    dst.set_ch_layout(layout.clone().into_inner());
-    dst.get_buffer(0)?;
-    Ok(dst)
-}
-
-/// Worst-case output sample count for a resample step, with a small
-/// margin so the FIFO never has to grow at write time. Computed in i64
-/// and clamped to a safe i32 ceiling: pathological inputs (e.g. a
-/// corrupt `src_rate == 0` clamped to 1 with a high target rate) would
-/// otherwise overflow `as i32` and produce a negative `nb_samples`
-/// that crashes `AVFrame::get_buffer`.
-fn compute_resample_capacity(src_nb_samples: i32, src_rate: i32, dst_rate: i32) -> i32 {
-    const MAX_NB_SAMPLES: i64 = 1 << 20; // 1 Mi-samples is far past any real audio frame.
-    if src_nb_samples <= 0 {
-        return 4096;
-    }
-    let raw = i64::from(src_nb_samples) * i64::from(dst_rate.max(1)) / i64::from(src_rate.max(1));
-    raw.saturating_add(256).clamp(1, MAX_NB_SAMPLES) as i32
-}
-
-fn resolve_channels(requested: Option<i32>, src: i32) -> Result<i32, NativeError> {
-    // When the caller hasn't asked for a specific layout we only carry
-    // mono / stereo sources through unchanged. A source with more
-    // channels (5.1, 7.1, ...) would otherwise be silently downmixed,
-    // which hides the layout change from downstream callers and
-    // violates the project's no-hidden-fallbacks rule. Force the
-    // caller to opt in to mono or stereo explicitly via `:channels`.
-    let target = if let Some(value) = requested {
-        value
-    } else if (1..=2).contains(&src) {
-        src
-    } else {
-        return Err(NativeError::new(
-            "invalid_request",
-            "source has more than 2 channels; pass `:channels` (1 or 2) to choose mono or stereo",
-        )
-        .with_detail("source_channels", src.to_string()));
-    };
-    if !(1..=2).contains(&target) {
-        return Err(
-            NativeError::new("invalid_request", "channels must be 1 (mono) or 2 (stereo)")
-                .with_detail("channels", target.to_string()),
-        );
-    }
-    Ok(target)
 }
 
 fn find_audio_stream(
@@ -538,11 +475,4 @@ fn find_audio_stream(
         )),
         Err(err) => Err(err.into()),
     }
-}
-
-fn to_cstring(path: &Path) -> Result<CString, NativeError> {
-    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
-    })
 }

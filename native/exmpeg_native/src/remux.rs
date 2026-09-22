@@ -3,7 +3,6 @@
 //! `ffmpeg -i in.mkv -c copy out.mp4` and the common
 //! `-ss START -t DURATION -c copy` cut-without-reencode pattern.
 
-use std::ffi::CString;
 use std::path::Path;
 
 use rsmpeg::avcodec::AVCodecParameters;
@@ -12,6 +11,7 @@ use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::atomic_output;
 use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
@@ -33,8 +33,11 @@ pub(crate) struct RemuxOpts {
     /// first packet of a video stream to be a keyframe, so callers that
     /// need precise cuts should pass a value that lands on or before one.
     pub(crate) start_s: Option<f64>,
-    /// Optional duration in seconds. Packets whose pts is at least
-    /// `start_s + duration_s` are skipped and the loop terminates.
+    /// Optional duration in seconds. A stream ends at its first packet
+    /// whose dts is at least `start_s + duration_s`, like
+    /// `ffmpeg -t -c copy`. A B-frame stream keeps its last reorder group
+    /// whole, so a few frames can present up to the reorder delay past
+    /// the window.
     pub(crate) duration_s: Option<f64>,
     /// Skip every audio stream (equivalent to `ffmpeg -an`).
     pub(crate) drop_audio: Option<bool>,
@@ -68,7 +71,7 @@ pub(crate) fn remux<Q: AsRef<Path>>(
     opts: &RemuxOpts,
 ) -> Result<RemuxStats, NativeError> {
     let output_path = output_path.as_ref();
-    let out_url = to_cstring(output_path)?;
+    let out_url = atomic_output::to_cstring(output_path)?;
 
     let mut input = source.open()?;
 
@@ -151,12 +154,13 @@ pub(crate) fn remux<Q: AsRef<Path>>(
     // closing tick reports the real end position rather than 0.0.
     let mut last_written_pts_s = 0.0;
     // Per output-stream end-of-window flag. With `:duration_s`, a gated
-    // (audio/video) stream ends individually when its first packet passes
-    // the window; the loop only stops once every gated stream is done (or
-    // the input hits EOF), so an interleaved stream that lags (B-frame
-    // video can run ahead of audio) is not truncated by another reaching
-    // the end first. Non-gated streams start `done` so they neither block
-    // termination nor cause the loop to read to EOF.
+    // (audio/video) stream ends individually when the dts of its first
+    // packet passes the window; the loop only stops once every gated
+    // stream is done (or the input hits EOF), so an interleaved stream
+    // that lags (B-frame video can run ahead of audio) is not truncated
+    // by another reaching the end first. Non-gated streams start `done`
+    // so they neither block termination nor cause the loop to read to
+    // EOF.
     let mut done: Vec<bool> = window_gated.iter().map(|&gated| !gated).collect();
     let mut progress =
         ProgressEmitter::from_av_duration(env, opts.progress, "remux", input.duration);
@@ -173,46 +177,42 @@ pub(crate) fn remux<Q: AsRef<Path>>(
 
         let in_stream = &input.streams()[in_index];
         let tb = in_stream.time_base;
-        let pts_s = if packet.pts == ffi::AV_NOPTS_VALUE {
-            None
-        } else {
-            Some(packet.pts as f64 * f64::from(tb.num) / f64::from(tb.den))
+        let secs = |ts: i64| {
+            (ts != ffi::AV_NOPTS_VALUE).then(|| ts as f64 * f64::from(tb.num) / f64::from(tb.den))
         };
-        // Fall back to dts for the window check so a packet with no pts
-        // is still bounded by the window rather than always written.
-        let window_ts = pts_s.or_else(|| {
-            if packet.dts == ffi::AV_NOPTS_VALUE {
-                None
-            } else {
-                Some(packet.dts as f64 * f64::from(tb.num) / f64::from(tb.den))
-            }
-        });
+        let pts_s = secs(packet.pts);
+        let dts_s = secs(packet.dts);
 
-        if let Some(ts) = window_ts {
-            if ts < start_s {
-                packets_dropped += 1;
-                continue;
+        // The start check reads pts and the end check reads dts, each
+        // with the other as a fallback, as `ffmpeg -ss S -t D -c copy`
+        // does. Dts is monotonic in decode order, so the end check stops
+        // a B-frame stream only after its last in-window frame and the
+        // references that frame needs.
+        if let Some(ts) = pts_s.or(dts_s)
+            && ts < start_s
+        {
+            packets_dropped += 1;
+            continue;
+        }
+        if let (Some(end), Some(ts)) = (end_s, dts_s.or(pts_s))
+            && ts >= end
+        {
+            packets_dropped += 1;
+            if window_gated[out_index as usize] {
+                done[out_index as usize] = true;
             }
-            if let Some(end) = end_s
-                && ts >= end
-            {
-                packets_dropped += 1;
-                if window_gated[out_index as usize] {
-                    done[out_index as usize] = true;
-                }
-                // Stop once every gated stream has crossed the window, or
-                // once we are well past it. The slack guards the case the
-                // per-stream flags cannot: a gated stream that ends
-                // *before* the window (a short audio track, for example)
-                // never crosses, so without this a bounded cut would keep
-                // reading to EOF. Interleaving lag in a sane file is well
-                // under this slack, so no in-window packet of a lagging
-                // stream is dropped.
-                if done.iter().all(|&d| d) || ts >= end + WINDOW_SLACK_S {
-                    break;
-                }
-                continue;
+            // Stop once every gated stream has crossed the window, or
+            // once we are well past it. The slack guards the case the
+            // per-stream flags cannot: a gated stream that ends
+            // *before* the window (a short audio track, for example)
+            // never crosses, so without this a bounded cut would keep
+            // reading to EOF. Interleaving lag in a sane file is well
+            // under this slack, so no in-window packet of a lagging
+            // stream is dropped.
+            if done.iter().all(|&d| d) || ts >= end + WINDOW_SLACK_S {
+                break;
             }
+            continue;
         }
 
         let out_tb = output.streams()[out_index as usize].time_base;
@@ -236,13 +236,6 @@ pub(crate) fn remux<Q: AsRef<Path>>(
         packets_written,
         packets_dropped,
         streams_copied,
-    })
-}
-
-fn to_cstring(path: &Path) -> Result<CString, NativeError> {
-    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
     })
 }
 

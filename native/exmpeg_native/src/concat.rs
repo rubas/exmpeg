@@ -1,26 +1,40 @@
 //! Concatenation of multiple inputs into one output container without
 //! re-encoding. Replaces `ffmpeg -f concat -i list.txt -c copy out`.
 //!
-//! Every input is opened in sequence, packets are stream-copied to the
-//! output, and pts/dts are shifted by the cumulative duration of the
-//! preceding inputs so the resulting timeline is monotonic.
+//! Every input is opened, checked against the first input, and closed
+//! before the first packet is written. The copy then reopens the inputs
+//! one at a time, stream-copies their packets to the output, and moves
+//! pts/dts from the input's own start time to the cumulative duration of
+//! the preceding inputs, so the resulting timeline starts at zero and has
+//! no gap at a join.
 //!
 //! All inputs must share the same stream layout (same number of streams,
-//! same codec id per stream index). Mismatches return `:invalid_request`.
+//! same codec id per stream index) and the same codec parameters: the
+//! same profile per stream, sample rate, sample format, and channel
+//! layout per audio stream, and size, pixel format, and H.264 or HEVC
+//! parameter sets per video stream. A parameter that the probe left
+//! unset is not compared. Mismatches return `:invalid_request`.
 
-use std::ffi::CString;
+use std::ffi::CStr;
 use std::path::Path;
 
 use rsmpeg::avcodec::AVCodecParameters;
 use rsmpeg::avformat::{AVFormatContextInput, AVFormatContextOutput, AVOutputFormat};
+use rsmpeg::avutil::{av_rescale_q, get_pix_fmt_name, get_sample_fmt_name};
 use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::atomic_output;
 use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
 use crate::progress::ProgressEmitter;
+
+const AV_TIME_BASE_Q: ffi::AVRational = ffi::AVRational {
+    num: 1,
+    den: ffi::AV_TIME_BASE as i32,
+};
 
 #[derive(Default, NifMap)]
 pub(crate) struct ConcatOpts {
@@ -39,7 +53,7 @@ pub(crate) struct ConcatStats {
 
 pub(crate) fn concat<P: AsRef<Path>>(
     env: Env<'_>,
-    sources: Vec<crate::input::InputSource>,
+    sources: &[crate::input::InputSource],
     output_path: P,
     opts: &ConcatOpts,
 ) -> Result<ConcatStats, NativeError> {
@@ -50,9 +64,8 @@ pub(crate) fn concat<P: AsRef<Path>>(
         ));
     }
 
-    let total_inputs = sources.len();
     let output_path = output_path.as_ref();
-    let out_url = to_cstring(output_path)?;
+    let out_url = atomic_output::to_cstring(output_path)?;
 
     // No muxer matches the output extension: surface `unsupported` rather
     // than the generic io_error `create` would otherwise produce.
@@ -64,31 +77,28 @@ pub(crate) fn concat<P: AsRef<Path>>(
     }
 
     let mut output = AVFormatContextOutput::create(&out_url)?;
+    let mut cancel = CancelGuard::new(env);
 
-    let mut sources = sources.into_iter();
-    let first_source = sources.next().expect("non-empty checked above");
-    let first_label = first_source.describe();
-    // Open the first input to mint the output's stream layout.
-    // Subsequent inputs reuse the layout; if they don't match we return
-    // early.
-    let mut first = first_source
-        .open()
-        .map_err(|e| e.with_detail("path", first_label.clone()))?;
+    // Check every input before the first packet is written: stream copy
+    // writes the first input's codec parameters into the output header,
+    // so a later input that differs would be corrupt. Each checked input
+    // is closed again, so only two inputs are open at any time.
+    let first = open_input(&sources[0])?;
+    for source in &sources[1..] {
+        cancel.check()?;
+        assert_layout_matches(&first, &open_input(source)?, &source.describe())?;
+    }
 
-    let mut codec_ids: Vec<ffi::AVCodecID> = Vec::new();
     for in_stream in first.streams() {
-        let codecpar = in_stream.codecpar();
         let mut new_codecpar = AVCodecParameters::new();
-        new_codecpar.copy(&codecpar);
+        new_codecpar.copy(&in_stream.codecpar());
         ffi_helpers::clear_codec_tag(&mut new_codecpar);
 
         let mut out_stream = output.new_stream();
         out_stream.set_codecpar(new_codecpar);
         out_stream.set_time_base(in_stream.time_base);
-
-        codec_ids.push(codecpar.codec_id);
     }
-    let streams_copied = codec_ids.len() as u32;
+    let streams_copied = first.streams().len();
 
     let mut header_opts = None;
     output
@@ -102,44 +112,22 @@ pub(crate) fn concat<P: AsRef<Path>>(
         output.streams().iter().map(|s| s.time_base).collect();
 
     // Cumulative offset per stream, in that stream's output time_base.
-    let mut pts_offset: Vec<i64> = vec![0; codec_ids.len()];
+    let mut pts_offset: Vec<i64> = vec![0; streams_copied];
     // Minimum dts the next packet of each stream must hit. Used to
     // patch over AAC encoder priming (negative pts) and other small
     // per-frame shifts that would otherwise produce a non-monotonic
     // dts at input boundaries.
-    let mut next_min_dts: Vec<i64> = vec![i64::MIN / 2; codec_ids.len()];
+    let mut next_min_dts: Vec<i64> = vec![i64::MIN / 2; streams_copied];
     let mut packets_written: u64 = 0;
     let mut total_duration_s: f64 = 0.0;
     // For concat the input duration is unknown up front (we'd need to
     // sum every input's container duration before opening), so report
     // `0.0` and let the caller infer progress from packet count.
     let mut progress = ProgressEmitter::new(env, opts.progress, "concat", 0.0);
-    let mut cancel = CancelGuard::new(env);
 
-    process_input(
-        &mut first,
-        &mut output,
-        &out_time_bases,
-        &pts_offset,
-        &mut next_min_dts,
-        &mut packets_written,
-        &mut cancel,
-    )?;
-    advance_offsets(
-        &first,
-        &out_time_bases,
-        &mut pts_offset,
-        &next_min_dts,
-        &mut total_duration_s,
-    );
-    progress.tick(packets_written, total_duration_s);
-
-    for next in sources {
-        let label = next.describe();
-        let mut input = next
-            .open()
-            .map_err(|e| e.with_detail("path", label.clone()))?;
-        assert_layout_matches(&input, &codec_ids, &label)?;
+    // The copy reopens the checked inputs one at a time.
+    for input in std::iter::once(Ok(first)).chain(sources[1..].iter().map(open_input)) {
+        let mut input = input?;
         process_input(
             &mut input,
             &mut output,
@@ -164,10 +152,17 @@ pub(crate) fn concat<P: AsRef<Path>>(
 
     Ok(ConcatStats {
         packets_written,
-        inputs_joined: total_inputs as u32,
-        streams_copied,
+        inputs_joined: sources.len() as u32,
+        streams_copied: streams_copied as u32,
         duration_s: total_duration_s,
     })
+}
+
+fn open_input(source: &crate::input::InputSource) -> Result<AVFormatContextInput, NativeError> {
+    source
+        .clone()
+        .open()
+        .map_err(|e| e.with_detail("path", source.describe()))
 }
 
 fn process_input(
@@ -179,6 +174,21 @@ fn process_input(
     packets_written: &mut u64,
     cancel: &mut CancelGuard,
 ) -> Result<(), NativeError> {
+    // Move the input to a zero origin before the cumulative offset, as
+    // `ffmpeg -f concat` does. An MPEG-TS capture or an MP4 with an
+    // edit-list offset starts well after zero, and that start would
+    // otherwise stay in the join as a gap. One origin for the whole
+    // container, not one per stream, so the streams of an input keep
+    // their offsets to each other.
+    let start_time = if input.start_time == ffi::AV_NOPTS_VALUE {
+        0
+    } else {
+        input.start_time
+    };
+    let origin: Vec<i64> = out_time_bases
+        .iter()
+        .map(|&tb| av_rescale_q(start_time, AV_TIME_BASE_Q, tb))
+        .collect();
     while let Some(mut packet) = input.read_packet()? {
         cancel.check()?;
         let idx = packet.stream_index as usize;
@@ -194,7 +204,7 @@ fn process_input(
         // differ.
         packet.rescale_ts(in_tb, out_tb);
 
-        let offset = pts_offset[idx];
+        let offset = pts_offset[idx] - origin[idx];
         if packet.pts != ffi::AV_NOPTS_VALUE {
             packet.set_pts(packet.pts + offset);
         }
@@ -300,39 +310,128 @@ fn advance_offsets(
 }
 
 fn assert_layout_matches(
+    first: &AVFormatContextInput,
     input: &AVFormatContextInput,
-    template: &[ffi::AVCodecID],
     path: &str,
 ) -> Result<(), NativeError> {
-    if input.streams().len() != template.len() {
+    if input.streams().len() != first.streams().len() {
         return Err(NativeError::new(
             "invalid_request",
             "input stream count does not match the first input",
         )
         .with_detail("path", path.to_owned())
-        .with_detail("expected", template.len().to_string())
+        .with_detail("field", "stream_count")
+        .with_detail("expected", first.streams().len().to_string())
         .with_detail("got", input.streams().len().to_string()));
     }
-    for (idx, stream) in input.streams().iter().enumerate() {
-        let expected_codec = template[idx];
-        let got = stream.codecpar().codec_id;
-        if got != expected_codec {
+    for (idx, (a, b)) in first.streams().iter().zip(input.streams()).enumerate() {
+        if let Some((field, expected, got)) = codecpar_mismatch(&a.codecpar(), &b.codecpar()) {
             return Err(NativeError::new(
                 "invalid_request",
-                "input stream codec id does not match the first input",
+                format!("input stream {field} does not match the first input"),
             )
             .with_detail("path", path.to_owned())
             .with_detail("stream", idx.to_string())
-            .with_detail("expected", format!("{expected_codec:?}"))
-            .with_detail("got", format!("{got:?}")));
+            .with_detail("field", field)
+            .with_detail("expected", expected)
+            .with_detail("got", got));
         }
     }
     Ok(())
 }
 
-fn to_cstring(path: &Path) -> Result<CString, NativeError> {
-    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
-    })
+/// The first codec parameter in which `got` differs from `expected`, as
+/// `(field, expected, got)`. Packets are rescaled to the output time
+/// base, but their payloads are copied as they are, so every parameter a
+/// decoder reads from the header must match. A parameter the probe left
+/// unset (unknown profile, zero size or rate, no format, no channels) is
+/// not compared, as `ffmpeg -f concat` joins such inputs.
+fn codecpar_mismatch(
+    expected: &AVCodecParameters,
+    got: &AVCodecParameters,
+) -> Option<(&'static str, String, String)> {
+    let known = |e: i32, g: i32, unset: i32| e != unset && g != unset && e != g;
+    let int = |field, e: i32, g: i32, unset| {
+        known(e, g, unset).then(|| (field, e.to_string(), g.to_string()))
+    };
+    let named = |field, e: i32, g: i32, name: fn(i32) -> Option<&'static CStr>| {
+        let show =
+            |v: i32| name(v).map_or_else(|| v.to_string(), |c| c.to_string_lossy().into_owned());
+        known(e, g, -1).then(|| (field, show(e), show(g)))
+    };
+    let layout = |p: &AVCodecParameters| {
+        p.ch_layout()
+            .describe()
+            .map_or_else(|_| String::new(), |c| c.to_string_lossy().into_owned())
+    };
+    let (e_layout, g_layout) = (&expected.ch_layout, &got.ch_layout);
+    // A layout with unspecified order (a plain WAVEFORMATEX header) carries
+    // only a channel count, so it matches any layout with that count.
+    let layout_differs = if e_layout.order == ffi::AV_CHANNEL_ORDER_UNSPEC
+        || g_layout.order == ffi::AV_CHANNEL_ORDER_UNSPEC
+    {
+        known(e_layout.nb_channels, g_layout.nb_channels, 0)
+    } else {
+        !ffi_helpers::channel_layouts_equal(e_layout, g_layout)
+    };
+    // Stream copy keeps only the first input's out-of-band parameter sets
+    // (an avcC or hvcC record, version byte 1). Annex B extradata is not
+    // compared: those streams repeat their parameter sets in band.
+    let (e_extra, g_extra) = (
+        ffi_helpers::extradata(expected),
+        ffi_helpers::extradata(got),
+    );
+    let config_records = matches!(
+        expected.codec_id,
+        ffi::AV_CODEC_ID_H264 | ffi::AV_CODEC_ID_HEVC
+    ) && e_extra.first() == Some(&1)
+        && g_extra.first() == Some(&1);
+
+    (expected.codec_id != got.codec_id)
+        .then(|| {
+            let name = |id| ffi_helpers::codec_name(id).to_string_lossy().into_owned();
+            ("codec_id", name(expected.codec_id), name(got.codec_id))
+        })
+        .or_else(|| {
+            int(
+                "profile",
+                expected.profile,
+                got.profile,
+                ffi::AV_PROFILE_UNKNOWN,
+            )
+        })
+        .or_else(|| match expected.codec_type {
+            ffi::AVMEDIA_TYPE_AUDIO => int("sample_rate", expected.sample_rate, got.sample_rate, 0)
+                .or_else(|| {
+                    named(
+                        "sample_format",
+                        expected.format,
+                        got.format,
+                        get_sample_fmt_name,
+                    )
+                })
+                .or_else(|| {
+                    layout_differs.then(|| ("channel_layout", layout(expected), layout(got)))
+                }),
+            ffi::AVMEDIA_TYPE_VIDEO => int("width", expected.width, got.width, 0)
+                .or_else(|| int("height", expected.height, got.height, 0))
+                .or_else(|| {
+                    named(
+                        "pixel_format",
+                        expected.format,
+                        got.format,
+                        get_pix_fmt_name,
+                    )
+                })
+                .or_else(|| {
+                    (config_records && e_extra != g_extra).then(|| {
+                        (
+                            "extradata",
+                            format!("{e_extra:02x?}"),
+                            format!("{g_extra:02x?}"),
+                        )
+                    })
+                }),
+            _ => None,
+        })
 }

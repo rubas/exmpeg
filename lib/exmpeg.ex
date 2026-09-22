@@ -251,7 +251,10 @@ defmodule Exmpeg do
   - `:start_s` - drop packets whose pts is earlier than this offset (in
     seconds). The result is not keyframe-aligned: video that does not
     start on a keyframe will be unplayable until the next keyframe.
-  - `:duration_s` - stop after this many seconds past `:start_s`.
+  - `:duration_s` - stop after this many seconds past `:start_s`. The
+    cut follows decode order, like `ffmpeg -t -c copy`: a video stream
+    with B-frames keeps its last reorder group whole, so it can end a few
+    frames past the window.
 
   ## Returns
 
@@ -297,7 +300,10 @@ defmodule Exmpeg do
   - `:width` / `:height` - resize to this size in pixels. When only one
     dimension is given the other is computed to preserve the source
     aspect ratio. Both are rounded down to the nearest even value so the
-    encoder's pixel format requirements are met.
+    encoder's pixel format requirements are met. The image keeps the
+    source display aspect ratio: when both are given in another
+    proportion, the sample aspect ratio changes instead, as with the
+    `ffmpeg` `scale` filter.
 
   ## Returns
 
@@ -378,11 +384,18 @@ defmodule Exmpeg do
   Joins `inputs` into a single `output` without re-encoding.
 
   Every input must share the same stream layout (same number of streams
-  and same codec id per stream index). Mismatches return
-  `{:error, %Error{reason: :invalid_request}}`.
+  and same codec id per stream index) and the same codec parameters: the
+  same profile per stream, sample rate, sample format, and channel layout
+  per audio stream, and size, pixel format, and MP4-style H.264 or HEVC
+  parameter sets per video stream. A parameter that the probe could not
+  read is not compared. Every input is checked before the first packet
+  is written. A mismatch returns `{:error, %Error{reason: :invalid_request}}`
+  whose details name the `"field"`, and the `"stream"` index for a
+  per-stream field.
 
-  PTS / DTS values are shifted by the cumulative duration of preceding
-  inputs so the resulting timeline is monotonic.
+  PTS / DTS values move from each input's own start time to the
+  cumulative duration of the preceding inputs, so the output starts at
+  zero and has no gap at a join, like `ffmpeg -f concat`.
 
   ## Returns
 
@@ -424,8 +437,14 @@ defmodule Exmpeg do
   - `:video_bitrate` / `:audio_bitrate` - target bitrate in bps.
   - `:width` / `:height` - output video size in pixels. Specifying one
     derives the other from the source aspect ratio. Always rounded down
-    to the nearest even value.
+    to the nearest even value. The output keeps the source display
+    aspect ratio: when both are given in another proportion, the sample
+    aspect ratio changes instead, as with the `ffmpeg` `scale` filter.
   - `:fps` - target framerate as `{num, den}`. Defaults to the source.
+  - `:video_filter` - an FFmpeg filter chain such as `"crop=iw:ih-8:0:4"`.
+    It replaces `:width`, `:height`, and `:fps`. The output keeps the
+    timestamps the chain produces; a frame whose timestamp does not
+    advance is dropped.
   - `:sample_rate` - target audio sample rate in Hz.
   - `:channels` - `1` (mono) or `2` (stereo). A mono or stereo source is
     carried through when omitted; a source with more than 2 channels

@@ -12,11 +12,11 @@
 
 #![allow(unsafe_code)]
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 use rsmpeg::avcodec::AVCodecParameters;
 use rsmpeg::avformat::AVFormatContextOutput;
-use rsmpeg::avutil::{AVAudioFifo, AVDictionary, AVFrame};
+use rsmpeg::avutil::{AVAudioFifo, AVChannelLayout, AVDictionary, AVFrame};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 
@@ -44,6 +44,43 @@ pub(crate) fn channel_layouts_equal(a: &ffi::AVChannelLayout, b: &ffi::AVChannel
     // positive value when different, and a negative AVERROR on bad input;
     // only 0 counts as equal.
     unsafe { ffi::av_channel_layout_compare(a, b) == 0 }
+}
+
+/// The registered name of `id`, such as `h264` or `pcm_s16le`.
+pub(crate) fn codec_name(id: ffi::AVCodecID) -> &'static CStr {
+    // SAFETY: `avcodec_get_name` never returns NULL: it returns a static
+    // string from the codec descriptor table, or "unknown_codec".
+    unsafe { CStr::from_ptr(ffi::avcodec_get_name(id)) }
+}
+
+/// The out-of-band codec extradata of `params`, empty when it has none.
+pub(crate) fn extradata(params: &AVCodecParameters) -> &[u8] {
+    if params.extradata.is_null() || params.extradata_size <= 0 {
+        return &[];
+    }
+    // SAFETY: a non-NULL `extradata` points to at least `extradata_size`
+    // bytes owned by `params`, and the returned slice borrows `params`,
+    // so the bytes outlive it.
+    unsafe { std::slice::from_raw_parts(params.extradata, params.extradata_size as usize) }
+}
+
+/// Deep copy of `src` for a `set_ch_layout` setter, which takes
+/// ownership. rsmpeg's `AVChannelLayout::clone` copies into uninitialised
+/// memory, and `av_channel_layout_copy` first uninitialises its
+/// destination: a garbage `order` of `AV_CHANNEL_ORDER_CUSTOM` makes it
+/// free a garbage pointer and abort the VM.
+pub(crate) fn copy_ch_layout(src: &AVChannelLayout) -> Result<ffi::AVChannelLayout, RsmpegError> {
+    // SAFETY: an all-zero `AVChannelLayout` is the documented `{0}`
+    // initialiser (UNSPEC order, no channels, no custom map), so the
+    // uninit inside `av_channel_layout_copy` frees nothing. `src` is a
+    // valid, initialised layout for the borrow, and the copy owns any
+    // custom map it allocates.
+    let mut dst: ffi::AVChannelLayout = unsafe { std::mem::zeroed() };
+    // SAFETY: see above; both pointers are valid for the call.
+    match unsafe { ffi::av_channel_layout_copy(&raw mut dst, src.as_ptr()) } {
+        0 => Ok(dst),
+        err => Err(RsmpegError::AVError(err)),
+    }
 }
 
 /// Zero the `codec_tag` field of an `AVCodecParameters` so the muxer
@@ -157,6 +194,13 @@ mod tests {
             }
             Some(CStr::from_ptr((*entry).value))
         }
+    }
+
+    #[test]
+    fn copy_ch_layout_returns_an_equal_layout() {
+        let stereo = AVChannelLayout::from_nb_channels(2);
+        let copy = copy_ch_layout(&stereo).expect("copy");
+        assert!(channel_layouts_equal(&copy, &stereo));
     }
 
     #[test]
