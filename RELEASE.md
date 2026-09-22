@@ -77,10 +77,14 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
 
 2. **CI builds the artefacts**
 
-   On push to `main`, `.github/workflows/release.yml` detects the
-   version change, builds each NIF target in a separate matrix job,
-   creates the `vX.Y.Z` tag, and attaches every `*.tar.gz` plus
-   `SHA256SUMS` to a fresh GitHub release.
+   On every push to `main`, `.github/workflows/release.yml` reads
+   `@version` from `mix.exs`. When the `vX.Y.Z` tag does not exist, it
+   builds each NIF target in a separate matrix job, creates the tag, and
+   attaches every `*.tar.gz` plus `SHA256SUMS` to a fresh GitHub
+   release. The tag marks the version as released. If a run fails
+   before it creates the tag, the next push to `main` retries the
+   release. If the run fails after it creates the tag, rebuild the tag
+   by hand as described below.
 
    Wait for the workflow to finish. Confirm the tarballs are on the
    release page (`https://github.com/rubas/exmpeg/releases/tag/vX.Y.Z`).
