@@ -81,9 +81,10 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     decoder.open(None)?;
 
     let target_rate = pick_sample_rate(&encoder_codec, opts.sample_rate, decoder.sample_rate);
-    let target_channels = resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
+    let target_channels =
+        crate::audio::resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
     let target_layout = AVChannelLayout::from_nb_channels(target_channels);
-    let target_fmt = pick_sample_fmt(&encoder_codec, decoder.sample_fmt);
+    let target_fmt = crate::audio::pick_sample_fmt(&encoder_codec, decoder.sample_fmt);
 
     let mut encoder = AVCodecContext::new(&encoder_codec);
     encoder.set_sample_rate(target_rate);
@@ -186,8 +187,12 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             };
 
             if let (Some(swr), Some(fifo)) = (swr.as_mut(), fifo.as_mut()) {
-                let mut resampled =
-                    alloc_resample_frame(&frame, &target_layout, target_fmt, target_rate)?;
+                let mut resampled = crate::audio::alloc_resample_frame(
+                    &frame,
+                    &target_layout,
+                    target_fmt,
+                    target_rate,
+                )?;
                 swr.convert_frame(Some(&frame), &mut resampled)?;
                 if resampled.nb_samples > 0 {
                     ffi_helpers::write_fifo_frame(fifo, &resampled)?;
@@ -245,8 +250,12 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             Err(err) => return Err(err.into()),
         };
         if let (Some(swr), Some(fifo)) = (swr.as_mut(), fifo.as_mut()) {
-            let mut resampled =
-                alloc_resample_frame(&frame, &target_layout, target_fmt, target_rate)?;
+            let mut resampled = crate::audio::alloc_resample_frame(
+                &frame,
+                &target_layout,
+                target_fmt,
+                target_rate,
+            )?;
             swr.convert_frame(Some(&frame), &mut resampled)?;
             if resampled.nb_samples > 0 {
                 ffi_helpers::write_fifo_frame(fifo, &resampled)?;
@@ -281,7 +290,8 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     // buffered between the decoder and the encoder.
     if let (Some(swr), Some(fifo)) = (swr.as_mut(), fifo.as_mut()) {
         loop {
-            let mut tail = empty_resample_frame(&target_layout, target_fmt, target_rate)?;
+            let mut tail =
+                crate::audio::empty_resample_frame(&target_layout, target_fmt, target_rate)?;
             swr.convert_frame(None, &mut tail)?;
             if tail.nb_samples == 0 {
                 break;
@@ -344,18 +354,6 @@ fn pick_encoder(ext: Option<&str>) -> Result<AVCodecRef<'static>, NativeError> {
         )
         .with_detail("encoder", codec_name.to_owned())
     })
-}
-
-fn pick_sample_fmt(codec: &AVCodecRef<'static>, src: i32) -> i32 {
-    if let Some(fmts) = codec.sample_fmts() {
-        if fmts.contains(&src) {
-            return src;
-        }
-        if let Some(first) = fmts.first() {
-            return *first;
-        }
-    }
-    src
 }
 
 fn pick_sample_rate(codec: &AVCodecRef<'static>, requested: Option<i32>, src: i32) -> i32 {
@@ -463,78 +461,6 @@ fn write_drained_packets(
         }
     }
     Ok(())
-}
-
-fn alloc_resample_frame(
-    src: &AVFrame,
-    layout: &AVChannelLayout,
-    fmt: i32,
-    sample_rate: i32,
-) -> Result<AVFrame, NativeError> {
-    let nb_samples = compute_resample_capacity(src.nb_samples, src.sample_rate, sample_rate);
-    let mut dst = AVFrame::new();
-    dst.set_nb_samples(nb_samples);
-    dst.set_sample_rate(sample_rate);
-    dst.set_format(fmt);
-    dst.set_ch_layout(layout.clone().into_inner());
-    dst.get_buffer(0)?;
-    Ok(dst)
-}
-
-fn empty_resample_frame(
-    layout: &AVChannelLayout,
-    fmt: i32,
-    sample_rate: i32,
-) -> Result<AVFrame, NativeError> {
-    let mut dst = AVFrame::new();
-    dst.set_nb_samples(4096);
-    dst.set_sample_rate(sample_rate);
-    dst.set_format(fmt);
-    dst.set_ch_layout(layout.clone().into_inner());
-    dst.get_buffer(0)?;
-    Ok(dst)
-}
-
-/// Worst-case output sample count for a resample step, with a small
-/// margin so the FIFO never has to grow at write time. Computed in i64
-/// and clamped to a safe i32 ceiling: pathological inputs (e.g. a
-/// corrupt `src_rate == 0` clamped to 1 with a high target rate) would
-/// otherwise overflow `as i32` and produce a negative `nb_samples`
-/// that crashes `AVFrame::get_buffer`.
-fn compute_resample_capacity(src_nb_samples: i32, src_rate: i32, dst_rate: i32) -> i32 {
-    const MAX_NB_SAMPLES: i64 = 1 << 20; // 1 Mi-samples is far past any real audio frame.
-    if src_nb_samples <= 0 {
-        return 4096;
-    }
-    let raw = i64::from(src_nb_samples) * i64::from(dst_rate.max(1)) / i64::from(src_rate.max(1));
-    raw.saturating_add(256).clamp(1, MAX_NB_SAMPLES) as i32
-}
-
-fn resolve_channels(requested: Option<i32>, src: i32) -> Result<i32, NativeError> {
-    // When the caller hasn't asked for a specific layout we only carry
-    // mono / stereo sources through unchanged. A source with more
-    // channels (5.1, 7.1, ...) would otherwise be silently downmixed,
-    // which hides the layout change from downstream callers and
-    // violates the project's no-hidden-fallbacks rule. Force the
-    // caller to opt in to mono or stereo explicitly via `:channels`.
-    let target = if let Some(value) = requested {
-        value
-    } else if (1..=2).contains(&src) {
-        src
-    } else {
-        return Err(NativeError::new(
-            "invalid_request",
-            "source has more than 2 channels; pass `:channels` (1 or 2) to choose mono or stereo",
-        )
-        .with_detail("source_channels", src.to_string()));
-    };
-    if !(1..=2).contains(&target) {
-        return Err(
-            NativeError::new("invalid_request", "channels must be 1 (mono) or 2 (stereo)")
-                .with_detail("channels", target.to_string()),
-        );
-    }
-    Ok(target)
 }
 
 fn find_audio_stream(

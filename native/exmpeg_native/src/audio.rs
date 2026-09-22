@@ -1,6 +1,9 @@
 //! Shared helpers for the audio re-encode paths (`extract_audio`,
 //! `transcode`).
 
+use rsmpeg::avcodec::AVCodecRef;
+use rsmpeg::avutil::{AVChannelLayout, AVFrame};
+
 use crate::errors::NativeError;
 
 /// Resolve the target channel count for an audio re-encode.
@@ -30,6 +33,63 @@ pub(crate) fn resolve_channels(requested: Option<i32>, src: i32) -> Result<i32, 
         );
     }
     Ok(target)
+}
+
+pub(crate) fn pick_sample_fmt(codec: &AVCodecRef<'static>, src: i32) -> i32 {
+    if let Some(fmts) = codec.sample_fmts() {
+        if fmts.contains(&src) {
+            return src;
+        }
+        if let Some(first) = fmts.first() {
+            return *first;
+        }
+    }
+    src
+}
+
+pub(crate) fn alloc_resample_frame(
+    src: &AVFrame,
+    layout: &AVChannelLayout,
+    fmt: i32,
+    sample_rate: i32,
+) -> Result<AVFrame, NativeError> {
+    let nb_samples = compute_resample_capacity(src.nb_samples, src.sample_rate, sample_rate);
+    let mut dst = AVFrame::new();
+    dst.set_nb_samples(nb_samples);
+    dst.set_sample_rate(sample_rate);
+    dst.set_format(fmt);
+    dst.set_ch_layout(layout.clone().into_inner());
+    dst.get_buffer(0)?;
+    Ok(dst)
+}
+
+pub(crate) fn empty_resample_frame(
+    layout: &AVChannelLayout,
+    fmt: i32,
+    sample_rate: i32,
+) -> Result<AVFrame, NativeError> {
+    let mut dst = AVFrame::new();
+    dst.set_nb_samples(4096);
+    dst.set_sample_rate(sample_rate);
+    dst.set_format(fmt);
+    dst.set_ch_layout(layout.clone().into_inner());
+    dst.get_buffer(0)?;
+    Ok(dst)
+}
+
+/// Worst-case output sample count for a resample step, with a small
+/// margin so the FIFO never has to grow at write time. Computed in i64
+/// and clamped to a safe i32 ceiling: pathological inputs (e.g. a
+/// corrupt `src_rate == 0` clamped to 1 with a high target rate) would
+/// otherwise overflow `as i32` and produce a negative `nb_samples`
+/// that crashes `AVFrame::get_buffer`.
+fn compute_resample_capacity(src_nb_samples: i32, src_rate: i32, dst_rate: i32) -> i32 {
+    const MAX_NB_SAMPLES: i64 = 1 << 20; // 1 Mi-samples is far past any real audio frame.
+    if src_nb_samples <= 0 {
+        return 4096;
+    }
+    let raw = i64::from(src_nb_samples) * i64::from(dst_rate.max(1)) / i64::from(src_rate.max(1));
+    raw.saturating_add(256).clamp(1, MAX_NB_SAMPLES) as i32
 }
 
 #[cfg(test)]
