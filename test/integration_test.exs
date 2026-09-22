@@ -456,6 +456,29 @@ defmodule Exmpeg.IntegrationTest do
     assert format.duration_s > 1.5 and format.duration_s < 2.5
   end
 
+  test "transcode keeps a 10 fps rate that only the container carries" do
+    # FFV1 has no timing in its bitstream, so the decoder reports no frame
+    # rate; only Matroska knows the source is 10 fps. Falling back to
+    # 25 fps duplicated frames on the default chain and squeezed a custom
+    # :video_filter to 0.8 s.
+    src = Path.join(System.tmp_dir!(), "exmpeg_ffv1_#{System.unique_integer([:positive])}.mkv")
+    out = Path.join(System.tmp_dir!(), "exmpeg_ffv1_out_#{System.unique_integer([:positive])}.mp4")
+    out_crop = Path.join(System.tmp_dir!(), "exmpeg_ffv1_crop_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out, out_crop], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd("ffmpeg", ~w(-v error -y -f lavfi -i testsrc2=s=64x48:r=10:d=2 -c:v ffv1 #{src}), env: %{})
+
+    assert {:ok, _} = Exmpeg.transcode(src, out, video_codec: "libx264")
+    pts = video_packet_pts_times(out)
+    assert length(pts) == 20
+    assert_in_delta List.last(pts), 1.9, 0.01
+
+    assert {:ok, _} = Exmpeg.transcode(src, out_crop, video_codec: "libx264", video_filter: "crop=iw:ih-8:0:4")
+    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out_crop)
+    assert format.duration_s > 1.5 and format.duration_s < 2.5
+  end
+
   test "transcode drop options and metadata tags are reflected in the output", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_xc_tags_#{System.unique_integer([:positive])}.mp4")
     on_exit(fn -> File.rm(out) end)

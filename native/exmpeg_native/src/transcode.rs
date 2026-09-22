@@ -208,6 +208,7 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
                     &codecpar,
                     in_idx,
                     in_tb,
+                    stream.guess_framerate(),
                     global_header,
                     opts,
                 )?;
@@ -390,11 +391,15 @@ fn find_encoder_by_name_owned(name: &str) -> Result<AVCodecRef<'static>, NativeE
     })
 }
 
+/// `src_rate` is `av_guess_frame_rate` for the input stream. Unlike the
+/// decoder's `framerate`, it also sees a rate that only the container
+/// carries (FFV1, VP8/VP9, MJPEG, ProRes).
 fn build_video_pipeline(
     output: &mut AVFormatContextOutput,
     codecpar: &rsmpeg::avcodec::AVCodecParametersRef<'_>,
     in_idx: usize,
     in_tb: ffi::AVRational,
+    src_rate: Option<ffi::AVRational>,
     global_header: bool,
     opts: &TranscodeOpts,
 ) -> Result<StreamPipeline, NativeError> {
@@ -416,34 +421,10 @@ fn build_video_pipeline(
     let (heuristic_w, heuristic_h) = resolve_target_size(src_w, src_h, opts.width, opts.height);
     let dst_fmt = pick_pix_fmt(&encoder_codec, src_fmt);
 
-    let fps = opts.fps.unwrap_or_else(|| {
-        let src_fps = decoder.framerate;
-        if src_fps.den == 0 || src_fps.num == 0 {
-            (25, 1)
-        } else {
-            (src_fps.num, src_fps.den)
-        }
-    });
-
-    // Frame rate used to fill in the buffersink's rate when it reports
-    // `0/0`, for computing the pts step. The default chain appends
-    // `fps=N/D`, so `fps` (opts.fps or the source rate) is authoritative
-    // there. A custom `:video_filter` overrides `:fps` (see
-    // `build_video_filter_spec`), so its timing must come from the source
-    // cadence, not an `:fps` the caller passed but that is ignored - else
-    // a crop-only filter on a 10 fps input with `fps: {60, 1}` would be
-    // stamped at 1/60 s intervals and compressed to a sixth of its
-    // length.
-    let cadence_fps = if opts.video_filter.is_some() {
-        let src = decoder.framerate;
-        if src.num == 0 || src.den == 0 {
-            (25, 1)
-        } else {
-            (src.num, src.den)
-        }
-    } else {
-        fps
-    };
+    let src_fps = src_rate
+        .filter(|r| r.num > 0 && r.den > 0)
+        .map_or((25, 1), |r| (r.num, r.den));
+    let fps = opts.fps.unwrap_or(src_fps);
 
     let filter_spec = build_video_filter_spec(opts, heuristic_w, heuristic_h, fps, dst_fmt);
     let graph = build_video_graph(src_w, src_h, src_fmt, in_tb, src_sar, dst_fmt, &filter_spec)?;
@@ -459,10 +440,15 @@ fn build_video_pipeline(
             .ok_or_else(|| NativeError::new("runtime_error", "buffersink missing after config"))?;
         let tb = sink.get_time_base();
         let fr = sink.get_frame_rate();
+        // The default chain ends in `fps=N/D`, so only a custom
+        // `:video_filter` leaves the sink rate unknown. That chain
+        // overrides `:fps`, so its cadence is the source rate: a crop-only
+        // filter on a 10 fps input with `fps: {60, 1}` must not be stamped
+        // at 1/60 s intervals.
         let frame_rate = if fr.den == 0 || fr.num == 0 {
             ffi::AVRational {
-                num: cadence_fps.0,
-                den: cadence_fps.1,
+                num: src_fps.0,
+                den: src_fps.1,
             }
         } else {
             fr
