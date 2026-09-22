@@ -321,6 +321,22 @@ defmodule Exmpeg.IntegrationTest do
     assert Enum.any?(streams, &(&1.kind == :audio and &1.codec == "aac"))
   end
 
+  test "transcode re-encodes H.264 + AAC into Matroska with out-of-band codec headers", %{clip: clip} do
+    # Matroska stores the SPS/PPS in CodecPrivate. libx264 writes them to
+    # extradata only under AV_CODEC_FLAG_GLOBAL_HEADER; without the flag
+    # the muxer rejects the track at write_header.
+    out = Path.join(System.tmp_dir!(), "exmpeg_xc_mkv_#{System.unique_integer([:positive])}.mkv")
+    on_exit(fn -> File.rm(out) end)
+
+    assert {:ok, %{streams_reencoded: 2}} =
+             Exmpeg.transcode(clip, out, video_codec: "libx264", audio_codec: "aac", width: 80)
+
+    assert {:ok, %MediaInfo{streams: streams}} = Exmpeg.probe(out)
+    assert Enum.any?(streams, &(&1.kind == :video and &1.codec == "h264"))
+    assert Enum.any?(streams, &(&1.kind == :audio and &1.codec == "aac"))
+    assert {"", 0} = System.cmd("ffmpeg", ~w(-v error -i #{out} -f null -), stderr_to_stdout: true, env: %{})
+  end
+
   test "transcode of a surround source requires an explicit :channels" do
     # 5.1 source. Re-encoding the audio without :channels would silently
     # downmix to stereo; instead it must return :invalid_request, matching

@@ -153,6 +153,11 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
     let drop_video = opts.drop_video.unwrap_or(false);
     let drop_subtitles = opts.drop_subtitles.unwrap_or(false);
 
+    // Containers such as Matroska and MP4 carry codec headers out of band.
+    // An encoder writes them into extradata only when asked, and without
+    // them the muxer writes a track with no codec configuration.
+    let global_header = output.oformat().flags & ffi::AVFMT_GLOBALHEADER as i32 != 0;
+
     let mut pipelines: Vec<StreamPipeline> = Vec::new();
     let mut streams_copied: u32 = 0;
     let mut streams_reencoded: u32 = 0;
@@ -198,12 +203,26 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
         // through the `if !want_reencode` branch above.
         match codec_type {
             ffi::AVMEDIA_TYPE_VIDEO => {
-                let pipeline = build_video_pipeline(&mut output, &codecpar, in_idx, in_tb, opts)?;
+                let pipeline = build_video_pipeline(
+                    &mut output,
+                    &codecpar,
+                    in_idx,
+                    in_tb,
+                    global_header,
+                    opts,
+                )?;
                 pipelines.push(pipeline);
                 streams_reencoded += 1;
             }
             ffi::AVMEDIA_TYPE_AUDIO => {
-                let pipeline = build_audio_pipeline(&mut output, &codecpar, in_idx, in_tb, opts)?;
+                let pipeline = build_audio_pipeline(
+                    &mut output,
+                    &codecpar,
+                    in_idx,
+                    in_tb,
+                    global_header,
+                    opts,
+                )?;
                 pipelines.push(pipeline);
                 streams_reencoded += 1;
             }
@@ -376,6 +395,7 @@ fn build_video_pipeline(
     codecpar: &rsmpeg::avcodec::AVCodecParametersRef<'_>,
     in_idx: usize,
     in_tb: ffi::AVRational,
+    global_header: bool,
     opts: &TranscodeOpts,
 ) -> Result<StreamPipeline, NativeError> {
     let decoder_codec = AVCodec::find_decoder(codecpar.codec_id).ok_or_else(|| {
@@ -464,6 +484,9 @@ fn build_video_pipeline(
     encoder.set_framerate(out_frame_rate);
     if let Some(br) = opts.video_bitrate {
         encoder.set_bit_rate(br);
+    }
+    if global_header {
+        encoder.set_flags(encoder.flags | ffi::AV_CODEC_FLAG_GLOBAL_HEADER as i32);
     }
     encoder.open(None)?;
 
@@ -605,6 +628,7 @@ fn build_audio_pipeline(
     codecpar: &rsmpeg::avcodec::AVCodecParametersRef<'_>,
     in_idx: usize,
     in_tb: ffi::AVRational,
+    global_header: bool,
     opts: &TranscodeOpts,
 ) -> Result<StreamPipeline, NativeError> {
     let decoder_codec = AVCodec::find_decoder(codecpar.codec_id).ok_or_else(|| {
@@ -636,6 +660,9 @@ fn build_audio_pipeline(
     });
     if let Some(br) = opts.audio_bitrate {
         encoder.set_bit_rate(br);
+    }
+    if global_header {
+        encoder.set_flags(encoder.flags | ffi::AV_CODEC_FLAG_GLOBAL_HEADER as i32);
     }
     encoder.open(None)?;
 
