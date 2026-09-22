@@ -64,7 +64,7 @@ jobs:
         # on unmaintained crates) fail the run, so a newly-unmaintained
         # dependency is caught. RUSTSEC-2024-0436 (`paste`) is the one known
         # exception: it is a compile-time-only proc-macro pulled in
-        # transitively by the pinned rsmpeg revision, contributing no runtime
+        # transitively by rsmpeg 0.18, contributing no runtime
         # code, so it is maintenance risk rather than an exploitable
         # vulnerability. Tracked until rsmpeg drops `paste` (or moves to the
         # maintained `pastey` fork), picked up at the next rsmpeg bump.
