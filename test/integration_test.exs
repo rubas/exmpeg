@@ -613,6 +613,50 @@ defmodule Exmpeg.IntegrationTest do
     Enum.zip_with(src_pts, out_pts, &assert_in_delta(&1, &2, 0.002))
   end
 
+  test "transcode :video_filter drops a frame whose timestamp does not advance" do
+    # Every frame shares its pts with the next one, as in many phone and
+    # screen recordings. The muxer rejected the second frame of each pair.
+    src = Path.join(System.tmp_dir!(), "exmpeg_dup_pts_#{System.unique_integer([:positive])}.mkv")
+    out = Path.join(System.tmp_dir!(), "exmpeg_dup_pts_out_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=10:d=2 -vf) ++
+          ["setpts='floor(N/2)*2/10/TB'"] ++ ~w(-fps_mode passthrough -c:v ffv1 #{src}),
+        env: %{}
+      )
+
+    src_pts = video_packet_pts_times(src)
+    assert length(src_pts) == 20
+
+    assert {:ok, _} = Exmpeg.transcode(src, out, video_codec: "libx264", video_filter: "crop=iw:ih-8:0:4")
+    assert video_packet_pts_times(out) == Enum.dedup(src_pts)
+  end
+
+  test "transcode stamps raw H.264 frames that carry no timestamps" do
+    # An Annex B stream has no timestamps at all. The frames entered the
+    # graph without a pts, so the muxer rejected them or the fps filter
+    # dropped them.
+    src = Path.join(System.tmp_dir!(), "exmpeg_raw_#{System.unique_integer([:positive])}.h264")
+
+    outs =
+      for _ <- 1..2, do: Path.join(System.tmp_dir!(), "exmpeg_raw_out_#{System.unique_integer([:positive])}.mp4")
+
+    on_exit(fn -> Enum.each([src | outs], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd("ffmpeg", ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=10:d=2 -c:v libx264 #{src}), env: %{})
+
+    for {out, opts} <- Enum.zip(outs, [[], [video_filter: "null"]]) do
+      assert {:ok, _} = Exmpeg.transcode(src, out, [video_codec: "libx264"] ++ opts)
+      pts = video_packet_pts_times(out)
+      assert length(pts) == 20
+      assert_in_delta List.last(pts), 1.9, 0.01
+    end
+  end
+
   test "transcode keeps a 10 fps rate that only the container carries" do
     # FFV1 has no timing in its bitstream, so the decoder reports no frame
     # rate; only Matroska knows the source is 10 fps. Falling back to

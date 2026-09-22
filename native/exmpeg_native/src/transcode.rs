@@ -15,7 +15,7 @@ use std::path::Path;
 use rsmpeg::avcodec::{AVCodec, AVCodecContext, AVCodecRef};
 use rsmpeg::avfilter::{AVFilter, AVFilterGraph, AVFilterInOut};
 use rsmpeg::avformat::{AVFormatContextOutput, AVStreamRef};
-use rsmpeg::avutil::{AVAudioFifo, AVChannelLayout, AVFrame, av_rescale_q};
+use rsmpeg::avutil::{AVAudioFifo, AVChannelLayout, AVFrame, av_rescale_q, ra};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 use rsmpeg::swresample::SwrContext;
@@ -98,6 +98,15 @@ enum StreamPipeline {
         decoder: AVCodecContext,
         encoder: AVCodecContext,
         graph: VideoFilterGraph,
+        /// Pts for a decoded frame that has none, in the input time_base:
+        /// the previous frame's pts plus its duration, as the ffmpeg CLI
+        /// extrapolates. A raw H.264 stream carries no timestamps.
+        next_in_pts: i64,
+        /// One frame at the source rate, in the input time_base, for a
+        /// frame without a duration.
+        frame_step: i64,
+        /// Last pts sent to the encoder, in the sink time_base.
+        last_out_pts: i64,
     },
     Audio {
         in_idx: usize,
@@ -474,6 +483,9 @@ fn build_video_pipeline(
         decoder,
         encoder,
         graph,
+        next_in_pts: 0,
+        frame_step: av_rescale_q(1, ra(src_fps.1, src_fps.0), in_tb).max(1),
+        last_out_pts: ffi::AV_NOPTS_VALUE,
     })
 }
 
@@ -675,6 +687,9 @@ fn process_video_packet(
         decoder,
         encoder,
         graph,
+        next_in_pts,
+        frame_step,
+        last_out_pts,
         ..
     } = pipeline
     else {
@@ -692,7 +707,17 @@ fn process_video_packet(
         // leaves unset. The graph and the encoder keep the timestamps the
         // frame enters with, so use the decoder's best guess, as the
         // ffmpeg CLI does.
-        frame.set_pts(frame.best_effort_timestamp);
+        let pts = match frame.best_effort_timestamp {
+            ffi::AV_NOPTS_VALUE => *next_in_pts,
+            ts => ts,
+        };
+        frame.set_pts(pts);
+        let duration = if frame.duration > 0 {
+            frame.duration
+        } else {
+            *frame_step
+        };
+        *next_in_pts = pts + duration;
 
         push_video_frame_through_graph(graph, Some(&frame))?;
         drain_filter_and_encode(
@@ -701,6 +726,7 @@ fn process_video_packet(
             output,
             *out_idx,
             out_time_bases,
+            last_out_pts,
             packets_written,
             cancel,
         )?;
@@ -716,6 +742,7 @@ fn process_video_packet(
             output,
             *out_idx,
             out_time_bases,
+            last_out_pts,
             packets_written,
             cancel,
         )?;
@@ -738,16 +765,21 @@ fn push_video_frame_through_graph(
 }
 
 /// Pull every frame the graph has ready and encode it with the timestamp
-/// the graph gave it; the encoder time_base is the sink time_base. One
-/// input frame can yield an unbounded number of output frames (`tpad`,
-/// `loop`, or `reverse` at EOF), so the caller's liveness is checked per
-/// frame.
+/// the graph gave it; the encoder time_base is the sink time_base. A frame
+/// whose pts does not advance past `last_out_pts` is dropped, as the
+/// ffmpeg CLI does in its vfr mode: a filter such as `setpts=0.5*PTS` or a
+/// source with duplicate timestamps would otherwise feed the muxer a
+/// non-increasing dts. One input frame can yield an unbounded number of
+/// output frames (`tpad`, `loop`, or `reverse` at EOF), so the caller's
+/// liveness is checked per frame.
+#[allow(clippy::too_many_arguments)]
 fn drain_filter_and_encode(
     graph: &VideoFilterGraph,
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
     out_idx: i32,
     out_time_bases: &[ffi::AVRational],
+    last_out_pts: &mut i64,
     packets_written: &mut u64,
     cancel: &mut CancelGuard,
 ) -> Result<(), NativeError> {
@@ -764,6 +796,12 @@ fn drain_filter_and_encode(
             }
             Err(err) => return Err(err.into()),
         };
+        // `AV_NOPTS_VALUE` is `i64::MIN`, so a frame without a pts is
+        // dropped too.
+        if filtered.pts <= *last_out_pts {
+            continue;
+        }
+        *last_out_pts = filtered.pts;
 
         encoder.send_frame(Some(&filtered))?;
         write_drained_packets(encoder, output, out_idx, out_time_bases, packets_written)?;
