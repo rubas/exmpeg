@@ -165,11 +165,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.local/ffmpeg
-          # `lgpl-webp-v1` invalidates earlier caches that were built with
-          # `--enable-gpl --enable-libx264` or without libwebp. The bundled
-          # FFmpeg is LGPL-only (libmp3lame/libopus/libvpx/libwebp) so the
-          # precompiled tarballs can ship under the package's MIT license.
-          key: release-${{ runner.os }}-${{ runner.arch }}-ffmpeg-${{ env.FFMPEG_VERSION }}-lgpl-webp-v1
+          # Bump the suffix when the configure flags change, or the cached
+          # prefix hides the change. `v2` drops xlib.
+          key: release-${{ runner.os }}-${{ runner.arch }}-ffmpeg-${{ env.FFMPEG_VERSION }}-lgpl-webp-v2
 
       - name: Install build deps (Linux)
         if: runner.os == 'Linux'
@@ -258,6 +256,9 @@ jobs:
           # software encoding (libx264/libx265, GPL) is therefore not in
           # the precompiled binaries; consumers who need it build from
           # source (EXMPEG_BUILD=1) against their own GPL FFmpeg.
+          # `--disable-xlib`: configure detects the runner's Homebrew
+          # libX11 and links it into every library, but no consumer
+          # installs it.
           ./configure \
             --prefix="$PREFIX" \
             --disable-static \
@@ -266,6 +267,7 @@ jobs:
             --disable-doc \
             --disable-debug \
             --enable-pic \
+            --disable-xlib \
             --enable-libmp3lame \
             --enable-libopus \
             --enable-libvpx \
@@ -311,6 +313,9 @@ jobs:
         working-directory: native/exmpeg_native
         env:
           TARGET: ${{ matrix.target }}
+          # rusty_ffmpeg links all seven FFmpeg libraries. GNU ld drops the
+          # unused libavdevice as needed; ld64 keeps it unless told to.
+          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: "-C link-arg=-Wl,-dead_strip_dylibs"
         run: |
           cargo build --release --target "$TARGET"
 
@@ -365,32 +370,53 @@ jobs:
             fi
           done
 
-          # Patch the NIF so it looks for the bundled libs next to
-          # itself rather than at the absolute prefix recorded by the
-          # linker. `$ORIGIN` is the loader's literal-string placeholder
-          # for the directory containing the loaded ELF / Mach-O image.
+          # Make the bundle find its libraries next to itself rather
+          # than at the absolute prefix recorded by the linker.
           if [ "$(uname)" = "Darwin" ]; then
-            # macOS: rewrite every absolute load command pointing at
-            # the FFmpeg prefix to a @loader_path one.
-            for dep in $(otool -L "${STAGE}/${LIB_NAME}" | awk 'NR > 1 {print $1}'); do
-              case "$dep" in
-                ${FFMPEG_PREFIX}/lib/*)
-                  install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" "${STAGE}/${LIB_NAME}"
-                  ;;
-              esac
+            # macOS: give every image an @loader_path install name and
+            # rewrite each load command under the FFmpeg prefix to one.
+            for image in "${STAGE}"/*; do
+              [ -L "$image" ] && continue
+              args=(-id "@loader_path/$(basename "$image")")
+              for dep in $(otool -L "$image" | awk 'NR > 1 {print $1}'); do
+                case "$dep" in
+                  "${FFMPEG_PREFIX}"/lib/*)
+                    args+=(-change "$dep" "@loader_path/$(basename "$dep")")
+                    ;;
+                esac
+              done
+              install_name_tool "${args[@]}" "$image"
             done
           else
             patchelf --set-rpath '$ORIGIN' "${STAGE}/${LIB_NAME}"
           fi
 
-          # Verify the bundle: every NEEDED / LC_LOAD_DYLIB pointing at
-          # FFmpeg should now resolve relative to the tarball.
-          if [ "$(uname)" = "Darwin" ]; then
-            otool -L "${STAGE}/${LIB_NAME}"
-          else
-            ldd "${STAGE}/${LIB_NAME}" || true
-          fi
+          # Fail when the bundle loads a library the consumer does not
+          # have: every name must resolve inside the archive, to the OS,
+          # or (macOS) to a codec formula README.md lists.
           ls -la "${STAGE}"
+          if [ "$(uname)" = "Darwin" ]; then
+            BREW_OPT="$(brew --prefix)/opt"
+            unbundled=0
+            for image in "${STAGE}"/*; do
+              [ -L "$image" ] && continue
+              otool -L "$image"
+              for dep in $(otool -L "$image" | awk 'NR > 1 {print $1}'); do
+                case "$dep" in
+                  @loader_path/*) [ -e "${STAGE}/${dep#@loader_path/}" ] && continue ;;
+                  /usr/lib/* | /System/Library/*) continue ;;
+                  "$BREW_OPT"/lame/lib/* | "$BREW_OPT"/opus/lib/* | "$BREW_OPT"/libvpx/lib/* | "$BREW_OPT"/webp/lib/*) continue ;;
+                esac
+                echo "::error::$(basename "$image") loads $dep, which the archive does not bundle" >&2
+                unbundled=1
+              done
+            done
+            [ "$unbundled" = 0 ] || exit 1
+          else
+            if env -u LD_LIBRARY_PATH ldd "${STAGE}/${LIB_NAME}" | grep 'not found' >&2; then
+              exit 1
+            fi
+          fi
 
           tar -czf "${LIB_NAME}.tar.gz" -C "${STAGE}" .
 

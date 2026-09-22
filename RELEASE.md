@@ -32,7 +32,7 @@ Each tarball contains the NIF and the six FFmpeg shared libraries it
 loads at runtime:
 
 ```
-libexmpeg_native-vX.Y.Z-nif-2.17-<target>.so   # NIF (RPATH=$ORIGIN / @loader_path)
+libexmpeg_native-vX.Y.Z-nif-2.17-<target>.so   # NIF
 libavformat.so.62 / libavformat.62.dylib
 libavcodec.so.62  / libavcodec.62.dylib
 libavutil.so.60   / libavutil.60.dylib
@@ -41,12 +41,25 @@ libswscale.so.9   / libswscale.9.dylib
 libswresample.so.6 / libswresample.6.dylib
 ```
 
-The NIF's RPATH is patched to `$ORIGIN` (Linux) or `@loader_path`
-(macOS) so the FFmpeg libs resolve relative to the extracted tarball
-without `LD_LIBRARY_PATH`. The bundled FFmpeg is built LGPL-only (no
-`--enable-gpl` / `--enable-libx264`) so the tarballs ship under the
-package's MIT license. Codec libraries (libmp3lame / libopus / libvpx)
-are **not** bundled - consumers install them via their distro package
+The FFmpeg libs resolve relative to the extracted tarball without
+`LD_LIBRARY_PATH`. On Linux the NIF's RPATH is `$ORIGIN`. On macOS every
+install name in the tarball is `@loader_path/...`: the ID of each image
+and each load command that pointed at the FFmpeg prefix. The macOS link
+passes `-dead_strip_dylibs`, so the NIF does not load the unused
+`libavdevice` that `rusty_ffmpeg` links.
+
+The job fails before it packs the tarball when the bundle loads a
+library the consumer does not have. On Linux, `ldd` without
+`LD_LIBRARY_PATH` must find every library. On macOS, every install name
+must be a member of the tarball, a system path (`/usr/lib`,
+`/System/Library`), or a Homebrew codec formula (`lame`, `opus`,
+`libvpx`, `webp`).
+
+The bundled FFmpeg is built LGPL-only (no `--enable-gpl` /
+`--enable-libx264`) so the tarballs ship under the package's MIT
+license. It is also built with `--disable-xlib`, so no library loads
+libX11. Codec libraries (libmp3lame / libopus / libvpx / libwebp) are
+**not** bundled - consumers install them via their distro package
 manager. See README.md's "Runtime requirements" section for the per-OS
 install commands.
 
@@ -122,6 +135,12 @@ follow steps 3 and 4 above.
   the matrix builds drifted. Re-run the failed matrix job or
   re-trigger the whole workflow. The checksum command refuses to write
   out partial results.
+- **A build job fails with "which the archive does not bundle"** - the
+  NIF or a bundled library loads a library the tarball does not ship.
+  The error names the member and the load command. Most often the
+  runner has a new Homebrew or apt package that FFmpeg's configure
+  detects. Disable that feature in the configure call and bump the
+  FFmpeg cache key suffix.
 - **Missing target after `checksum:download`** — confirm the target
   appears in both `lib/exmpeg/native.ex` `:targets` and the release
   matrix. If a matrix job failed, no tarball exists for that target.
