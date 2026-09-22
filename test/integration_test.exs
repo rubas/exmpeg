@@ -168,6 +168,20 @@ defmodule Exmpeg.IntegrationTest do
     end
   end
 
+  test "extract_frame keeps an anamorphic source's display aspect ratio" do
+    src = make_anamorphic_clip()
+    jpg = Path.join(System.tmp_dir!(), "exmpeg_sar_frame_#{System.unique_integer([:positive])}.jpg")
+    png = Path.join(System.tmp_dir!(), "exmpeg_sar_frame_#{System.unique_integer([:positive])}.png")
+    on_exit(fn -> Enum.each([src, jpg, png], &File.rm/1) end)
+
+    assert {:ok, %{width: 720, height: 576}} = Exmpeg.extract_frame(src, jpg)
+    assert video_aspect(jpg) == {"720x576", "64:45", "16:9"}
+
+    # A non-proportional resize folds the pixel shape change into the SAR.
+    assert {:ok, %{width: 360, height: 360}} = Exmpeg.extract_frame(src, png, width: 360, height: 360)
+    assert video_aspect(png) == {"360x360", "16:9", "16:9"}
+  end
+
   test "extract_audio writes a WAV with the requested rate and channel count", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_audio_#{System.unique_integer([:positive])}.wav")
     on_exit(fn -> File.rm(out) end)
@@ -477,6 +491,30 @@ defmodule Exmpeg.IntegrationTest do
     assert {:ok, _} = Exmpeg.transcode(src, out_crop, video_codec: "libx264", video_filter: "crop=iw:ih-8:0:4")
     assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out_crop)
     assert format.duration_s > 1.5 and format.duration_s < 2.5
+  end
+
+  test "transcode keeps the sample aspect ratio the filter graph produces" do
+    # 720x576 at SAR 64:45 displays as 16:9. The encoder never got the SAR,
+    # so every re-encode came out as square pixels (5:4).
+    src = make_anamorphic_clip()
+
+    outs =
+      for name <- ~w(same.mkv square.mp4 setsar.mp4),
+          do: Path.join(System.tmp_dir!(), "exmpeg_sar_#{System.unique_integer([:positive])}_#{name}")
+
+    [same, square, setsar] = outs
+    on_exit(fn -> Enum.each([src | outs], &File.rm/1) end)
+
+    assert {:ok, _} = Exmpeg.transcode(src, same, video_codec: "libx264")
+    assert video_aspect(same) == {"720x576", "64:45", "16:9"}
+
+    # A non-proportional resize keeps the display aspect ratio through
+    # the SAR, as the `scale` filter and the ffmpeg CLI do.
+    assert {:ok, _} = Exmpeg.transcode(src, square, video_codec: "libx264", width: 360, height: 360)
+    assert video_aspect(square) == {"360x360", "16:9", "16:9"}
+
+    assert {:ok, _} = Exmpeg.transcode(src, setsar, video_codec: "libx264", video_filter: "setsar=2")
+    assert video_aspect(setsar) == {"720x576", "2:1", "5:2"}
   end
 
   test "transcode drop options and metadata tags are reflected in the output", %{clip: clip} do
@@ -863,6 +901,35 @@ defmodule Exmpeg.IntegrationTest do
 
     File.write!(path, bytes)
     path
+  end
+
+  # A 1 s 720x576 clip with SAR 64:45, so it displays as 16:9.
+  defp make_anamorphic_clip do
+    path = Path.join(System.tmp_dir!(), "exmpeg_anamorphic_#{System.unique_integer([:positive])}.mp4")
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=720x576:r=10:d=1 -vf setsar=64/45 -c:v libx264 #{path}),
+        env: %{}
+      )
+
+    path
+  end
+
+  # `{"WxH", sar, dar}` of the first video stream, read via ffprobe; the
+  # probe API does not expose the sample aspect ratio.
+  defp video_aspect(path) do
+    {out, 0} =
+      System.cmd(
+        "ffprobe",
+        ~w(-v error -select_streams v:0 -show_entries stream=width,height,sample_aspect_ratio,display_aspect_ratio) ++
+          ["-of", "csv=p=0", path],
+        env: %{}
+      )
+
+    [w, h, sar, dar] = out |> String.trim() |> String.split(",")
+    {"#{w}x#{h}", sar, dar}
   end
 
   # Sorted presentation timestamps (seconds) of a file's video packets, read

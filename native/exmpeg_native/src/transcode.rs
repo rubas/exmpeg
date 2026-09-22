@@ -429,11 +429,11 @@ fn build_video_pipeline(
     let filter_spec = build_video_filter_spec(opts, heuristic_w, heuristic_h, fps, dst_fmt);
     let graph = build_video_graph(src_w, src_h, src_fmt, in_tb, src_sar, dst_fmt, &filter_spec)?;
 
-    // Use the post-config buffersink dimensions / pix_fmt to drive the
-    // encoder. This makes the user's `:video_filter` authoritative
-    // (e.g. `crop` + `scale` chained changes the final dimensions away
-    // from the heuristic above).
-    let (out_w, out_h, out_fmt, out_tb, out_frame_rate) = {
+    // Use the post-config buffersink dimensions / pix_fmt / sample aspect
+    // ratio to drive the encoder. This makes the user's `:video_filter`
+    // authoritative (e.g. `crop` + `scale` chained changes the final
+    // dimensions away from the heuristic above, `setsar` the pixel shape).
+    let (out_w, out_h, out_fmt, out_sar, out_tb, out_frame_rate) = {
         let sink = graph
             .graph
             .get_filter(c"out")
@@ -457,6 +457,7 @@ fn build_video_pipeline(
             sink.get_w(),
             sink.get_h(),
             sink.get_format(),
+            sink.get_sample_aspect_ratio(),
             tb,
             frame_rate,
         )
@@ -466,6 +467,7 @@ fn build_video_pipeline(
     encoder.set_width(out_w);
     encoder.set_height(out_h);
     encoder.set_pix_fmt(out_fmt);
+    encoder.set_sample_aspect_ratio(out_sar);
     encoder.set_time_base(out_tb);
     encoder.set_framerate(out_frame_rate);
     if let Some(br) = opts.video_bitrate {
@@ -499,6 +501,9 @@ fn build_video_pipeline(
         let mut out_stream = output.new_stream();
         out_stream.set_codecpar(encoder.extract_codecpar());
         out_stream.set_time_base(encoder.time_base);
+        // Matroska and MP4 derive the display size from the stream SAR,
+        // not from the codec parameters.
+        out_stream.set_sample_aspect_ratio(out_sar);
         out_idx = out_stream.index;
     }
 
