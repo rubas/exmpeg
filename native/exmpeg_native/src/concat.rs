@@ -1,12 +1,13 @@
 //! Concatenation of multiple inputs into one output container without
 //! re-encoding. Replaces `ffmpeg -f concat -i list.txt -c copy out`.
 //!
-//! Every input is opened in sequence, packets are stream-copied to the
-//! output, and pts/dts are moved from the input's own start time to the
-//! cumulative duration of the preceding inputs, so the resulting
-//! timeline starts at zero and has no gap at a join.
+//! Every input is opened, checked against the first input, and closed
+//! before the first packet is written. The copy then reopens the inputs
+//! one at a time, stream-copies their packets to the output, and moves
+//! pts/dts from the input's own start time to the cumulative duration of
+//! the preceding inputs, so the resulting timeline starts at zero and has
+//! no gap at a join.
 //!
-//! Every input is opened and checked before the first packet is written.
 //! All inputs must share the same stream layout (same number of streams,
 //! same codec id per stream index) and the same codec parameters: the
 //! same profile per stream, sample rate, sample format, and channel
@@ -50,7 +51,7 @@ pub(crate) struct ConcatStats {
 
 pub(crate) fn concat<P: AsRef<Path>>(
     env: Env<'_>,
-    sources: Vec<crate::input::InputSource>,
+    sources: &[crate::input::InputSource],
     output_path: P,
     opts: &ConcatOpts,
 ) -> Result<ConcatStats, NativeError> {
@@ -74,23 +75,16 @@ pub(crate) fn concat<P: AsRef<Path>>(
     }
 
     let mut output = AVFormatContextOutput::create(&out_url)?;
+    let mut cancel = CancelGuard::new(env);
 
-    // Open and check every input before the first packet is written:
-    // stream copy writes the first input's codec parameters into the
-    // output header, so a later input that differs would be corrupt.
-    let mut inputs = sources
-        .into_iter()
-        .map(|source| {
-            let label = source.describe();
-            let input = source
-                .open()
-                .map_err(|e| e.with_detail("path", label.clone()))?;
-            Ok((label, input))
-        })
-        .collect::<Result<Vec<_>, NativeError>>()?;
-    let first = &inputs[0].1;
-    for (label, input) in &inputs[1..] {
-        assert_layout_matches(first, input, label)?;
+    // Check every input before the first packet is written: stream copy
+    // writes the first input's codec parameters into the output header,
+    // so a later input that differs would be corrupt. Each checked input
+    // is closed again, so only two inputs are open at any time.
+    let first = open_input(&sources[0])?;
+    for source in &sources[1..] {
+        cancel.check()?;
+        assert_layout_matches(&first, &open_input(source)?, &source.describe())?;
     }
 
     for in_stream in first.streams() {
@@ -128,11 +122,12 @@ pub(crate) fn concat<P: AsRef<Path>>(
     // sum every input's container duration before opening), so report
     // `0.0` and let the caller infer progress from packet count.
     let mut progress = ProgressEmitter::new(env, opts.progress, "concat", 0.0);
-    let mut cancel = CancelGuard::new(env);
 
-    for (_, input) in &mut inputs {
+    // The copy reopens the checked inputs one at a time.
+    for input in std::iter::once(Ok(first)).chain(sources[1..].iter().map(open_input)) {
+        let mut input = input?;
         process_input(
-            input,
+            &mut input,
             &mut output,
             &out_time_bases,
             &pts_offset,
@@ -141,7 +136,7 @@ pub(crate) fn concat<P: AsRef<Path>>(
             &mut cancel,
         )?;
         advance_offsets(
-            input,
+            &input,
             &out_time_bases,
             &mut pts_offset,
             &next_min_dts,
@@ -155,10 +150,17 @@ pub(crate) fn concat<P: AsRef<Path>>(
 
     Ok(ConcatStats {
         packets_written,
-        inputs_joined: inputs.len() as u32,
+        inputs_joined: sources.len() as u32,
         streams_copied: streams_copied as u32,
         duration_s: total_duration_s,
     })
+}
+
+fn open_input(source: &crate::input::InputSource) -> Result<AVFormatContextInput, NativeError> {
+    source
+        .clone()
+        .open()
+        .map_err(|e| e.with_detail("path", source.describe()))
 }
 
 fn process_input(
