@@ -166,6 +166,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     };
 
     let mut samples_written: u64 = 0;
+    let mut packets_written: u64 = 0;
     let mut progress =
         ProgressEmitter::from_av_duration(env, opts.progress, "extract_audio", input.duration);
     let mut cancel = CancelGuard::new(env);
@@ -198,6 +199,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
                     target_rate,
                     &target_layout,
                     &mut samples_written,
+                    &mut packets_written,
                     &mut encoder,
                     &mut output,
                     out_tb,
@@ -207,13 +209,14 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
                 encode_pcm_frame(
                     frame,
                     &mut samples_written,
+                    &mut packets_written,
                     &mut encoder,
                     &mut output,
                     out_tb,
                 )?;
             }
             progress.tick(
-                samples_written,
+                packets_written,
                 samples_written as f64 / f64::from(target_rate),
             );
         }
@@ -255,6 +258,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
                 target_rate,
                 &target_layout,
                 &mut samples_written,
+                &mut packets_written,
                 &mut encoder,
                 &mut output,
                 out_tb,
@@ -264,6 +268,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             encode_pcm_frame(
                 frame,
                 &mut samples_written,
+                &mut packets_written,
                 &mut encoder,
                 &mut output,
                 out_tb,
@@ -290,6 +295,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
             target_rate,
             &target_layout,
             &mut samples_written,
+            &mut packets_written,
             &mut encoder,
             &mut output,
             out_tb,
@@ -298,12 +304,12 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     }
 
     encoder.send_frame(None)?;
-    write_drained_packets(&mut encoder, &mut output, out_tb)?;
+    write_drained_packets(&mut encoder, &mut output, out_tb, &mut packets_written)?;
 
     output.write_trailer()?;
 
     let duration_s = samples_written as f64 / f64::from(target_rate);
-    progress.finish(samples_written, duration_s);
+    progress.finish(packets_written, duration_s);
 
     Ok(ExtractAudioStats {
         sample_rate: target_rate,
@@ -377,6 +383,7 @@ fn drain_fifo(
     sample_rate: i32,
     layout: &AVChannelLayout,
     samples_written: &mut u64,
+    packets_written: &mut u64,
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
     out_tb: ffi::AVRational,
@@ -411,7 +418,7 @@ fn drain_fifo(
         *samples_written += u64::try_from(read).unwrap_or(0);
 
         encoder.send_frame(Some(&frame))?;
-        write_drained_packets(encoder, output, out_tb)?;
+        write_drained_packets(encoder, output, out_tb, packets_written)?;
     }
 }
 
@@ -421,6 +428,7 @@ fn drain_fifo(
 fn encode_pcm_frame(
     mut frame: AVFrame,
     samples_written: &mut u64,
+    packets_written: &mut u64,
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
     out_tb: ffi::AVRational,
@@ -428,7 +436,7 @@ fn encode_pcm_frame(
     frame.set_pts(*samples_written as i64);
     *samples_written += u64::try_from(frame.nb_samples).unwrap_or(0);
     encoder.send_frame(Some(&frame))?;
-    write_drained_packets(encoder, output, out_tb)?;
+    write_drained_packets(encoder, output, out_tb, packets_written)?;
     Ok(())
 }
 
@@ -436,6 +444,7 @@ fn write_drained_packets(
     encoder: &mut AVCodecContext,
     output: &mut AVFormatContextOutput,
     out_tb: ffi::AVRational,
+    packets_written: &mut u64,
 ) -> Result<(), NativeError> {
     let enc_tb = encoder.time_base;
     loop {
@@ -447,6 +456,7 @@ fn write_drained_packets(
                 // chosen stream time_base before writing.
                 packet.rescale_ts(enc_tb, out_tb);
                 output.interleaved_write_frame(&mut packet)?;
+                *packets_written += 1;
             }
             Err(RsmpegError::EncoderDrainError | RsmpegError::EncoderFlushedError) => break,
             Err(err) => return Err(err.into()),
