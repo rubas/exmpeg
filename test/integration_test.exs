@@ -408,6 +408,43 @@ defmodule Exmpeg.IntegrationTest do
     assert format.start_time_s == nil or format.start_time_s < 0.1
   end
 
+  test "transcode keeps a re-encoded audio stream's 1 s delay against the video" do
+    # The audio starts ~1 s after the video (0.978 s after AAC priming).
+    # The re-encoded audio clock started at 0 and dropped that offset.
+    src = Path.join(System.tmp_dir!(), "exmpeg_delay_#{System.unique_integer([:positive])}.mp4")
+
+    outs =
+      for ext <- ~w(mp4 mp4 webm),
+          do: Path.join(System.tmp_dir!(), "exmpeg_delay_out_#{System.unique_integer([:positive])}.#{ext}")
+
+    on_exit(fn -> Enum.each([src | outs], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=64x48:r=10:d=3 -itsoffset 1) ++
+          ~w(-f lavfi -i sine=frequency=440:duration=2:sample_rate=48000 -c:v libx264 -c:a aac #{src}),
+        env: %{}
+      )
+
+    assert %{"video" => +0.0, "audio" => src_audio} = stream_start_times(src)
+    assert_in_delta src_audio, 0.978, 0.01
+
+    runs = [
+      [audio_codec: "aac"],
+      [video_codec: "libx264", audio_codec: "aac"],
+      [video_codec: "libvpx-vp9", audio_codec: "libopus"]
+    ]
+
+    for {out, opts} <- Enum.zip(outs, runs) do
+      assert {:ok, _} = Exmpeg.transcode(src, out, opts)
+      assert %{"video" => video, "audio" => audio} = stream_start_times(out)
+      assert video < 0.05
+      # The ffmpeg CLI gives 0.956 for AAC (a second priming) and 0.979 for Opus.
+      assert audio > 0.9 and audio < 1.0
+    end
+  end
+
   test "transcode mp4 -> webm with vp9 + opus", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_xc4_#{System.unique_integer([:positive])}.webm")
     on_exit(fn -> File.rm(out) end)
@@ -959,6 +996,22 @@ defmodule Exmpeg.IntegrationTest do
 
     [w, h, sar, dar] = out |> String.trim() |> String.split(",")
     {"#{w}x#{h}", sar, dar}
+  end
+
+  # `%{"video" => start_s, "audio" => start_s}` of a file's streams, read
+  # via ffprobe; the probe API reports only the container start time.
+  defp stream_start_times(path) do
+    {out, 0} =
+      System.cmd(
+        "ffprobe",
+        ~w(-v error -show_entries stream=codec_type,start_time -of csv=p=0 #{path}),
+        env: %{}
+      )
+
+    for line <- String.split(out, "\n", trim: true), into: %{} do
+      [kind, start] = String.split(line, ",")
+      {kind, String.to_float(start)}
+    end
   end
 
   # Sorted presentation timestamps (seconds) of a file's video packets, read

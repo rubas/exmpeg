@@ -101,6 +101,7 @@ enum StreamPipeline {
     },
     Audio {
         in_idx: usize,
+        in_tb: ffi::AVRational,
         out_idx: i32,
         decoder: AVCodecContext,
         encoder: AVCodecContext,
@@ -110,7 +111,10 @@ enum StreamPipeline {
         dst_layout: AVChannelLayout,
         dst_fmt: i32,
         dst_rate: i32,
-        samples_written: i64,
+        /// Output pts of the next sample, in `1/dst_rate`. The first
+        /// decoded frame seeds it, so a stream that starts after the
+        /// container origin keeps its offset against the other streams.
+        next_pts: Option<i64>,
     },
 }
 
@@ -240,8 +244,7 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
     // Every packet is shifted by the container start time before it is
     // copied or decoded, so a source that does not start at 0 (MPEG-TS
     // captures, edit-list offsets) lands on a zero origin while the
-    // streams keep their offsets against each other. The re-encoded
-    // audio sample counter still starts at 0.
+    // streams keep their offsets against each other.
     let input_start_time = input.start_time;
 
     while let Some(packet) = input.read_packet()? {
@@ -633,8 +636,6 @@ fn build_audio_pipeline(
         out_idx = out_stream.index;
     }
 
-    let _ = in_tb;
-
     // AAC / many other audio encoders require fixed `frame_size`
     // samples per call (except for the final flush). We buffer
     // resampled samples in an `AVAudioFifo` and emit one chunk per
@@ -646,6 +647,7 @@ fn build_audio_pipeline(
 
     Ok(StreamPipeline::Audio {
         in_idx,
+        in_tb,
         out_idx,
         decoder,
         encoder,
@@ -655,7 +657,7 @@ fn build_audio_pipeline(
         dst_layout,
         dst_fmt,
         dst_rate,
-        samples_written: 0,
+        next_pts: None,
     })
 }
 
@@ -775,6 +777,7 @@ fn process_audio_packet(
     packets_written: &mut u64,
 ) -> Result<(), NativeError> {
     let StreamPipeline::Audio {
+        in_tb,
         out_idx,
         decoder,
         encoder,
@@ -784,7 +787,7 @@ fn process_audio_packet(
         dst_layout,
         dst_fmt,
         dst_rate,
-        samples_written,
+        next_pts,
         ..
     } = pipeline
     else {
@@ -798,6 +801,10 @@ fn process_audio_packet(
             Err(RsmpegError::DecoderDrainError | RsmpegError::DecoderFlushedError) => break,
             Err(err) => return Err(err.into()),
         };
+        let pts = next_pts.get_or_insert_with(|| match frame.best_effort_timestamp {
+            ffi::AV_NOPTS_VALUE => 0,
+            ts => av_rescale_q(ts, *in_tb, encoder.time_base),
+        });
 
         let mut resampled = alloc_resample_frame(&frame, dst_layout, *dst_fmt, *dst_rate)?;
         swr.convert_frame(Some(&frame), &mut resampled)?;
@@ -811,7 +818,7 @@ fn process_audio_packet(
             *dst_fmt,
             *dst_rate,
             dst_layout,
-            samples_written,
+            pts,
             encoder,
             output,
             *out_idx,
@@ -838,7 +845,7 @@ fn process_audio_packet(
             *dst_fmt,
             *dst_rate,
             dst_layout,
-            samples_written,
+            next_pts.get_or_insert(0),
             encoder,
             output,
             *out_idx,
@@ -1054,7 +1061,7 @@ fn to_cstring(path: &Path) -> Result<CString, NativeError> {
 }
 
 /// The container start time, rescaled from `AV_TIME_BASE` units into a
-/// stream's time_base, to subtract from copied packets. `None` when the
+/// stream's time_base, to subtract from every packet. `None` when the
 /// source already starts at zero or carries no start time, so the common
 /// case adds no work and no shift.
 fn start_offset_in_tb(start_time: i64, stream_tb: ffi::AVRational) -> Option<i64> {
