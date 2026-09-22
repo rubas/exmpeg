@@ -300,7 +300,10 @@ defmodule Exmpeg do
   - `:width` / `:height` - resize to this size in pixels. When only one
     dimension is given the other is computed to preserve the source
     aspect ratio. Both are rounded down to the nearest even value so the
-    encoder's pixel format requirements are met.
+    encoder's pixel format requirements are met. The image keeps the
+    source display aspect ratio: when both are given in another
+    proportion, the sample aspect ratio changes instead, as with the
+    `ffmpeg` `scale` filter.
 
   ## Returns
 
@@ -434,8 +437,14 @@ defmodule Exmpeg do
   - `:video_bitrate` / `:audio_bitrate` - target bitrate in bps.
   - `:width` / `:height` - output video size in pixels. Specifying one
     derives the other from the source aspect ratio. Always rounded down
-    to the nearest even value.
+    to the nearest even value. The output keeps the source display
+    aspect ratio: when both are given in another proportion, the sample
+    aspect ratio changes instead, as with the `ffmpeg` `scale` filter.
   - `:fps` - target framerate as `{num, den}`. Defaults to the source.
+  - `:video_filter` - an FFmpeg filter chain such as `"crop=iw:ih-8:0:4"`.
+    It replaces `:width`, `:height`, and `:fps`. The output keeps the
+    timestamps the chain produces; a frame whose timestamp does not
+    advance is dropped.
   - `:sample_rate` - target audio sample rate in Hz.
   - `:channels` - `1` (mono) or `2` (stereo). A mono or stereo source is
     carried through when omitted; a source with more than 2 channels

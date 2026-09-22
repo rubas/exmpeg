@@ -197,6 +197,20 @@ defmodule Exmpeg.IntegrationTest do
     end
   end
 
+  test "extract_frame keeps an anamorphic source's display aspect ratio" do
+    src = make_anamorphic_clip()
+    jpg = Path.join(System.tmp_dir!(), "exmpeg_sar_frame_#{System.unique_integer([:positive])}.jpg")
+    png = Path.join(System.tmp_dir!(), "exmpeg_sar_frame_#{System.unique_integer([:positive])}.png")
+    on_exit(fn -> Enum.each([src, jpg, png], &File.rm/1) end)
+
+    assert {:ok, %{width: 720, height: 576}} = Exmpeg.extract_frame(src, jpg)
+    assert video_aspect(jpg) == {"720x576", "64:45", "16:9"}
+
+    # A non-proportional resize folds the pixel shape change into the SAR.
+    assert {:ok, %{width: 360, height: 360}} = Exmpeg.extract_frame(src, png, width: 360, height: 360)
+    assert video_aspect(png) == {"360x360", "16:9", "16:9"}
+  end
+
   test "extract_audio writes a WAV with the requested rate and channel count", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_audio_#{System.unique_integer([:positive])}.wav")
     on_exit(fn -> File.rm(out) end)
@@ -398,6 +412,22 @@ defmodule Exmpeg.IntegrationTest do
     assert Enum.any?(streams, &(&1.kind == :audio and &1.codec == "aac"))
   end
 
+  test "transcode re-encodes H.264 + AAC into Matroska with out-of-band codec headers", %{clip: clip} do
+    # Matroska stores the SPS/PPS in CodecPrivate. libx264 writes them to
+    # extradata only under AV_CODEC_FLAG_GLOBAL_HEADER; without the flag
+    # the muxer rejects the track at write_header.
+    out = Path.join(System.tmp_dir!(), "exmpeg_xc_mkv_#{System.unique_integer([:positive])}.mkv")
+    on_exit(fn -> File.rm(out) end)
+
+    assert {:ok, %{streams_reencoded: 2}} =
+             Exmpeg.transcode(clip, out, video_codec: "libx264", audio_codec: "aac", width: 80)
+
+    assert {:ok, %MediaInfo{streams: streams}} = Exmpeg.probe(out)
+    assert Enum.any?(streams, &(&1.kind == :video and &1.codec == "h264"))
+    assert Enum.any?(streams, &(&1.kind == :audio and &1.codec == "aac"))
+    assert {"", 0} = System.cmd("ffmpeg", ~w(-v error -i #{out} -f null -), stderr_to_stdout: true, env: %{})
+  end
+
   test "transcode of a surround source requires an explicit :channels" do
     # 5.1 source. Re-encoding the audio without :channels would silently
     # downmix to stereo; instead it must return :invalid_request, matching
@@ -455,6 +485,122 @@ defmodule Exmpeg.IntegrationTest do
     assert format.start_time_s == nil or format.start_time_s < 0.1
   end
 
+  test "transcode keeps a re-encoded audio stream's 1 s delay against the video" do
+    # The audio starts ~1 s after the video (0.978 s after AAC priming).
+    # The re-encoded audio clock started at 0 and dropped that offset.
+    src = Path.join(System.tmp_dir!(), "exmpeg_delay_#{System.unique_integer([:positive])}.mp4")
+
+    outs =
+      for ext <- ~w(mp4 mp4 webm),
+          do: Path.join(System.tmp_dir!(), "exmpeg_delay_out_#{System.unique_integer([:positive])}.#{ext}")
+
+    on_exit(fn -> Enum.each([src | outs], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=64x48:r=10:d=3 -itsoffset 1) ++
+          ~w(-f lavfi -i sine=frequency=440:duration=2:sample_rate=48000 -c:v libx264 -c:a aac #{src}),
+        env: %{}
+      )
+
+    assert %{"video" => +0.0, "audio" => src_audio} = stream_start_times(src)
+    assert_in_delta src_audio, 0.978, 0.01
+
+    runs = [
+      [audio_codec: "aac"],
+      [video_codec: "libx264", audio_codec: "aac"],
+      [video_codec: "libvpx-vp9", audio_codec: "libopus"]
+    ]
+
+    for {out, opts} <- Enum.zip(outs, runs) do
+      assert {:ok, _} = Exmpeg.transcode(src, out, opts)
+      assert %{"video" => video, "audio" => audio} = stream_start_times(out)
+      assert video < 0.05
+      # The ffmpeg CLI gives 0.956 for AAC (a second priming) and 0.979 for Opus.
+      assert audio > 0.9 and audio < 1.0
+    end
+  end
+
+  test "transcode keeps a gap inside re-encoded audio in line with the video" do
+    # Both streams skip the second between 1 s and 2 s. The audio clock
+    # packed the samples after the gap straight onto the ones before it,
+    # so the audio ended a second early and ran ahead of the video.
+    src = Path.join(System.tmp_dir!(), "exmpeg_gap_#{System.unique_integer([:positive])}.mp4")
+    out = Path.join(System.tmp_dir!(), "exmpeg_gap_out_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=10:d=4) ++
+          ~w(-f lavfi -i sine=frequency=440:duration=4:sample_rate=48000) ++
+          ["-vf", "select='not(between(t,1,1.999))'", "-af", "aselect='not(between(t,1,1.999))'"] ++
+          ~w(-fps_mode passthrough -c:v libx264 -c:a aac #{src}),
+        env: %{}
+      )
+
+    assert {:ok, _} =
+             Exmpeg.transcode(src, out, video_codec: "libx264", audio_codec: "aac", video_filter: "null")
+
+    # The ffmpeg CLI gives the same packet times as the source.
+    audio = audio_packet_pts_times(out)
+    assert_in_delta List.last(audio), 3.989, 0.002
+
+    assert [[gap_start, gap_end]] =
+             audio |> Enum.chunk_every(2, 1, :discard) |> Enum.filter(fn [a, b] -> b - a > 0.5 end)
+
+    assert_in_delta gap_start, 0.981, 0.002
+    assert_in_delta gap_end, 2.005, 0.002
+    assert_in_delta out |> video_packet_pts_times() |> List.last(), 3.9, 0.002
+  end
+
+  test "transcode moves a negative container start to zero without cutting re-encoded audio" do
+    # The audio starts at -0.52 s. Its timestamps stayed negative, and the
+    # MP4 muxer cut the half second before zero.
+    src = Path.join(System.tmp_dir!(), "exmpeg_neg_#{System.unique_integer([:positive])}.mkv")
+    out = Path.join(System.tmp_dir!(), "exmpeg_neg_out_#{System.unique_integer([:positive])}.m4a")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i sine=frequency=440:duration=2:sample_rate=48000) ++
+          ~w(-c:a aac -output_ts_offset -0.5 -avoid_negative_ts disabled #{src}),
+        env: %{}
+      )
+
+    assert %{"audio" => src_start} = stream_start_times(src)
+    assert src_start < -0.5
+
+    assert {:ok, _} = Exmpeg.transcode(src, out, audio_codec: "aac")
+    assert %{"audio" => +0.0} = stream_start_times(out)
+    # The ffmpeg CLI gives 2.026 s.
+    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
+    assert_in_delta format.duration_s, 2.026, 0.01
+  end
+
+  test "transcode starts re-encoded Opus audio with the copied video" do
+    # The Opus decoder trims its priming samples but moved the frame
+    # timestamp only when it knew the packet time_base. The audio then
+    # started 7 ms early and the muxer shifted the video to 0.007 s.
+    src = Path.join(System.tmp_dir!(), "exmpeg_opus_#{System.unique_integer([:positive])}.webm")
+    out = Path.join(System.tmp_dir!(), "exmpeg_opus_out_#{System.unique_integer([:positive])}.mkv")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=30:d=2) ++
+          ~w(-f lavfi -i sine=frequency=440:duration=2:sample_rate=48000 -c:v libvpx-vp9 -c:a libopus #{src}),
+        env: %{}
+      )
+
+    assert {:ok, %{streams_copied: 1}} = Exmpeg.transcode(src, out, audio_codec: "pcm_s16le")
+    # The ffmpeg CLI starts both streams at 0 too.
+    assert %{"video" => +0.0, "audio" => +0.0} = stream_start_times(out)
+  end
+
   test "transcode mp4 -> webm with vp9 + opus", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_xc4_#{System.unique_integer([:positive])}.webm")
     on_exit(fn -> File.rm(out) end)
@@ -493,16 +639,15 @@ defmodule Exmpeg.IntegrationTest do
     assert video.video.height < 60
 
     # A custom :video_filter chain with no fps filter keeps the input
-    # stream time_base on the buffersink. Stepping pts by a bare 1 there
-    # collapses the output to a few microseconds; stepping by one frame
-    # interval keeps the real ~2 s duration.
+    # stream time_base on the buffersink, and the frames keep their ~2 s
+    # of timestamps.
     assert format.duration_s > 1.5 and format.duration_s < 2.5
   end
 
   test "transcode :video_filter ignores an overridden :fps for pts timing", %{clip: clip} do
-    # `:video_filter` overrides `:fps`, so the pts step must come from the
-    # source cadence, not the ignored `:fps`. With the bug, a high `:fps`
-    # stamped frames too close together and compressed the duration.
+    # `:video_filter` overrides `:fps`, so the ignored `:fps` must not
+    # change the timing. A high `:fps` once stamped frames too close
+    # together and compressed the duration.
     out = Path.join(System.tmp_dir!(), "exmpeg_xc6_#{System.unique_integer([:positive])}.mp4")
     on_exit(fn -> File.rm(out) end)
 
@@ -515,6 +660,139 @@ defmodule Exmpeg.IntegrationTest do
 
     assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
     assert format.duration_s > 1.5 and format.duration_s < 2.5
+  end
+
+  test "transcode :video_filter keeps the timestamps the filter graph produces", %{clip: clip} do
+    # The frames were restamped at a fixed cadence, which undid setpts and
+    # flattened the gaps of a variable-frame-rate source.
+    vfr = Path.join(System.tmp_dir!(), "exmpeg_vfr_#{System.unique_integer([:positive])}.mp4")
+    outs = for _ <- 1..2, do: Path.join(System.tmp_dir!(), "exmpeg_vf_ts_#{System.unique_integer([:positive])}.mp4")
+    [slow, cropped] = outs
+    on_exit(fn -> Enum.each([vfr | outs], &File.rm/1) end)
+
+    assert {:ok, _} = Exmpeg.transcode(clip, slow, video_codec: "libx264", video_filter: "setpts=2*PTS")
+    assert_in_delta slow |> video_packet_pts_times() |> List.last(), 3.8, 0.01
+
+    # Ten frames 50 ms apart, then ten frames 150 ms apart.
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=10:d=2 -vf) ++
+          ["settb=1/1000,setpts='if(lt(N,10),N*0.05,0.5+(N-10)*0.15)/TB'"] ++
+          ~w(-fps_mode passthrough -enc_time_base 1/1000 -c:v libx264 -bf 0 #{vfr}),
+        env: %{}
+      )
+
+    assert {:ok, _} = Exmpeg.transcode(vfr, cropped, video_codec: "libx264", video_filter: "crop=iw:ih-20:0:10")
+
+    src_pts = video_packet_pts_times(vfr)
+    out_pts = video_packet_pts_times(cropped)
+    assert length(src_pts) == 20 and length(out_pts) == 20
+    assert_in_delta List.last(src_pts), 1.85, 0.002
+    Enum.zip_with(src_pts, out_pts, &assert_in_delta(&1, &2, 0.002))
+  end
+
+  test "transcode :video_filter drops a frame whose timestamp does not advance" do
+    # Every frame shares its pts with the next one, as in many phone and
+    # screen recordings. The muxer rejected the second frame of each pair.
+    src = Path.join(System.tmp_dir!(), "exmpeg_dup_pts_#{System.unique_integer([:positive])}.mkv")
+    out = Path.join(System.tmp_dir!(), "exmpeg_dup_pts_out_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=10:d=2 -vf) ++
+          ["setpts='floor(N/2)*2/10/TB'"] ++ ~w(-fps_mode passthrough -c:v ffv1 #{src}),
+        env: %{}
+      )
+
+    src_pts = video_packet_pts_times(src)
+    assert length(src_pts) == 20
+
+    assert {:ok, _} = Exmpeg.transcode(src, out, video_codec: "libx264", video_filter: "crop=iw:ih-8:0:4")
+    assert video_packet_pts_times(out) == Enum.dedup(src_pts)
+  end
+
+  test "transcode stamps raw H.264 frames that carry no timestamps" do
+    # An Annex B stream has no timestamps at all. The frames entered the
+    # graph without a pts, so the muxer rejected them or the fps filter
+    # dropped them.
+    src = Path.join(System.tmp_dir!(), "exmpeg_raw_#{System.unique_integer([:positive])}.h264")
+
+    outs =
+      for _ <- 1..2, do: Path.join(System.tmp_dir!(), "exmpeg_raw_out_#{System.unique_integer([:positive])}.mp4")
+
+    on_exit(fn -> Enum.each([src | outs], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd("ffmpeg", ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=10:d=2 -c:v libx264 #{src}), env: %{})
+
+    for {out, opts} <- Enum.zip(outs, [[], [video_filter: "null"]]) do
+      assert {:ok, _} = Exmpeg.transcode(src, out, [video_codec: "libx264"] ++ opts)
+      pts = video_packet_pts_times(out)
+      assert length(pts) == 20
+      assert_in_delta List.last(pts), 1.9, 0.01
+    end
+  end
+
+  test "transcode keeps a 10 fps rate that only the container carries" do
+    # FFV1 has no timing in its bitstream, so the decoder reports no frame
+    # rate; only Matroska knows the source is 10 fps. Falling back to
+    # 25 fps duplicated frames on the default chain and squeezed a custom
+    # :video_filter to 0.8 s.
+    src = Path.join(System.tmp_dir!(), "exmpeg_ffv1_#{System.unique_integer([:positive])}.mkv")
+    out = Path.join(System.tmp_dir!(), "exmpeg_ffv1_out_#{System.unique_integer([:positive])}.mp4")
+    out_crop = Path.join(System.tmp_dir!(), "exmpeg_ffv1_crop_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out, out_crop], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd("ffmpeg", ~w(-v error -y -f lavfi -i testsrc2=s=64x48:r=10:d=2 -c:v ffv1 #{src}), env: %{})
+
+    assert {:ok, _} = Exmpeg.transcode(src, out, video_codec: "libx264")
+    pts = video_packet_pts_times(out)
+    assert length(pts) == 20
+    assert_in_delta List.last(pts), 1.9, 0.01
+
+    assert {:ok, _} = Exmpeg.transcode(src, out_crop, video_codec: "libx264", video_filter: "crop=iw:ih-8:0:4")
+    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out_crop)
+    assert format.duration_s > 1.5 and format.duration_s < 2.5
+  end
+
+  test "transcode keeps the sample aspect ratio the filter graph produces" do
+    # 720x576 at SAR 64:45 displays as 16:9. The encoder never got the SAR,
+    # so every re-encode came out as square pixels (5:4).
+    src = make_anamorphic_clip()
+
+    outs =
+      for name <- ~w(same.mkv square.mp4 setsar.mp4),
+          do: Path.join(System.tmp_dir!(), "exmpeg_sar_#{System.unique_integer([:positive])}_#{name}")
+
+    [same, square, setsar] = outs
+    plain = Path.join(System.tmp_dir!(), "exmpeg_sar_plain_#{System.unique_integer([:positive])}.mp4")
+    container = Path.join(System.tmp_dir!(), "exmpeg_sar_container_#{System.unique_integer([:positive])}.mkv")
+    container_out = Path.join(System.tmp_dir!(), "exmpeg_sar_container_out_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, plain, container, container_out | outs], &File.rm/1) end)
+
+    assert {:ok, _} = Exmpeg.transcode(src, same, video_codec: "libx264")
+    assert video_aspect(same) == {"720x576", "64:45", "16:9"}
+
+    # A remux with -aspect sets the SAR only in the container, and the
+    # container wins over the bitstream's square pixels.
+    {_, 0} =
+      System.cmd("ffmpeg", ~w(-v error -y -f lavfi -i testsrc2=s=320x240:r=10:d=1 -c:v libx264 #{plain}), env: %{})
+
+    {_, 0} = System.cmd("ffmpeg", ~w(-v error -y -i #{plain} -c copy -aspect 16:9 #{container}), env: %{})
+    assert {:ok, _} = Exmpeg.transcode(container, container_out, video_codec: "libx264")
+    assert video_aspect(container_out) == {"320x240", "4:3", "16:9"}
+
+    # A non-proportional resize keeps the display aspect ratio through
+    # the SAR, as the `scale` filter and the ffmpeg CLI do.
+    assert {:ok, _} = Exmpeg.transcode(src, square, video_codec: "libx264", width: 360, height: 360)
+    assert video_aspect(square) == {"360x360", "16:9", "16:9"}
+
+    assert {:ok, _} = Exmpeg.transcode(src, setsar, video_codec: "libx264", video_filter: "setsar=2")
+    assert video_aspect(setsar) == {"720x576", "2:1", "5:2"}
   end
 
   test "transcode drop options and metadata tags are reflected in the output", %{clip: clip} do
@@ -978,14 +1256,63 @@ defmodule Exmpeg.IntegrationTest do
     path
   end
 
-  # Sorted presentation timestamps (seconds) of a file's video packets, read
-  # via ffprobe. The probe API exposes stream/format metadata but not
-  # per-packet timing, so concat boundary timing is asserted through this.
-  defp video_packet_pts_times(path) do
+  # A 1 s 720x576 clip with SAR 64:45, so it displays as 16:9.
+  defp make_anamorphic_clip do
+    path = Path.join(System.tmp_dir!(), "exmpeg_anamorphic_#{System.unique_integer([:positive])}.mp4")
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=720x576:r=10:d=1 -vf setsar=64/45 -c:v libx264 #{path}),
+        env: %{}
+      )
+
+    path
+  end
+
+  # `{"WxH", sar, dar}` of the first video stream, read via ffprobe; the
+  # probe API does not expose the sample aspect ratio.
+  defp video_aspect(path) do
     {out, 0} =
       System.cmd(
         "ffprobe",
-        ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+        ~w(-v error -select_streams v:0 -show_entries stream=width,height,sample_aspect_ratio,display_aspect_ratio) ++
+          ["-of", "csv=p=0", path],
+        env: %{}
+      )
+
+    [w, h, sar, dar] = out |> String.trim() |> String.split(",")
+    {"#{w}x#{h}", sar, dar}
+  end
+
+  # `%{"video" => start_s, "audio" => start_s}` of a file's streams, read
+  # via ffprobe; the probe API reports only the container start time.
+  defp stream_start_times(path) do
+    {out, 0} =
+      System.cmd(
+        "ffprobe",
+        ~w(-v error -show_entries stream=codec_type,start_time -of csv=p=0 #{path}),
+        env: %{}
+      )
+
+    for line <- String.split(out, "\n", trim: true), into: %{} do
+      [kind, start] = String.split(line, ",")
+      {kind, String.to_float(start)}
+    end
+  end
+
+  # Sorted presentation timestamps (seconds) of a file's video or audio
+  # packets, read via ffprobe. The probe API exposes stream/format metadata but not
+  # per-packet timing, so concat boundary timing is asserted through this.
+  defp video_packet_pts_times(path), do: packet_pts_times(path, "v:0")
+
+  defp audio_packet_pts_times(path), do: packet_pts_times(path, "a:0")
+
+  defp packet_pts_times(path, stream) do
+    {out, 0} =
+      System.cmd(
+        "ffprobe",
+        ["-v", "error", "-select_streams", stream, "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
         env: %{}
       )
 
@@ -1066,6 +1393,46 @@ defmodule Exmpeg.IntegrationTest do
     # `cancelled` error, and atomic_output removes the partial. No final
     # output is ever produced.
     assert eventually(fn -> partials_for(out) == [] and not File.exists?(out) end, 10_000)
+  end
+
+  test "killing the caller while the filter graph drains cancels the NIF and removes the partial" do
+    # Six input frames, so the packet loop ends almost at once. `tpad`
+    # emits its 30 000 padded frames only after EOF, so the kill lands in
+    # the filter drain. Without a liveness check there, the NIF keeps
+    # encoding for minutes after the caller is gone.
+    src = Path.join(System.tmp_dir!(), "exmpeg_cancel_drain_src_#{System.unique_integer([:positive])}.mp4")
+    out = Path.join(System.tmp_dir!(), "exmpeg_cancel_drain_out_#{System.unique_integer([:positive])}.mp4")
+
+    on_exit(fn ->
+      File.rm(src)
+      File.rm(out)
+      out |> partials_for() |> Enum.each(&File.rm/1)
+    end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-y -f lavfi -i testsrc2=s=1280x720:r=30:d=0.2 -c:v libx264 -preset ultrafast -pix_fmt yuv420p #{src}),
+        stderr_to_stdout: true,
+        env: %{}
+      )
+
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        send(parent, {:started, self()})
+        Exmpeg.transcode(src, out, video_codec: "libx264", video_filter: "tpad=stop=30000:stop_mode=clone")
+      end)
+
+    assert_receive {:started, ^pid}, 5_000
+    assert eventually(fn -> partials_for(out) != [] end, 10_000)
+
+    # Let the packet loop finish so the NIF is inside the drain.
+    Process.sleep(1_000)
+    Process.exit(pid, :kill)
+
+    assert eventually(fn -> partials_for(out) == [] and not File.exists?(out) end, 2_000)
   end
 
   defp drain_progress(acc) do
