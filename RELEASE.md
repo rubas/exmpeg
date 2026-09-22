@@ -48,12 +48,13 @@ and each load command that pointed at the FFmpeg prefix. The macOS link
 passes `-dead_strip_dylibs`, so the NIF does not load the unused
 `libavdevice` that `rusty_ffmpeg` links.
 
-The job fails before it packs the tarball when the bundle loads a
-library the consumer does not have. On Linux, `ldd` without
-`LD_LIBRARY_PATH` must find every library. On macOS, every install name
-must be a member of the tarball, a system path (`/usr/lib`,
-`/System/Library`), or a Homebrew codec formula (`lame`, `opus`,
-`libvpx`, `webp`).
+The job checks the bundle before it packs the tarball. On Linux, `ldd`
+without `LD_LIBRARY_PATH` must resolve every library on the runner, so
+a bundled FFmpeg library that is missing from the tarball fails with
+`=> not found`. This check does not catch a library that the runner has
+and the consumer does not. On macOS, every install name must be a
+member of the tarball, a system path (`/usr/lib`, `/System/Library`), or
+a Homebrew codec formula (`lame`, `opus`, `libvpx`, `webp`).
 
 The bundled FFmpeg is built LGPL-only (no `--enable-gpl` /
 `--enable-libx264`) so the tarballs ship under the package's MIT
@@ -84,7 +85,8 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
    release. The tag marks the version as released. If a run fails
    before it creates the tag, the next push to `main` retries the
    release. If the run fails after it creates the tag, rebuild the tag
-   by hand as described below.
+   by hand as described below. A push that lands during a release run
+   waits for that run to finish, then sees the new tag and skips.
 
    Wait for the workflow to finish. Confirm the tarballs are on the
    release page (`https://github.com/rubas/exmpeg/releases/tag/vX.Y.Z`).
@@ -133,7 +135,12 @@ The run builds the commit the tag points at, with the workflow file of
 the branch it started from. It fails before any build when the tag does
 not exist or when the tagged `mix.exs` has a different `@version`. It
 replaces the existing release artefacts. Then follow steps 3 and 4
-above.
+above from a branch at the rebuilt tag, not from `main`, because both
+steps read the version from the checkout:
+
+```bash
+git switch -c release/v0.1.1 v0.1.1
+```
 
 A rebuild never reproduces the old tarballs byte for byte, so their
 checksums change. Rebuild only a version that is not on Hex yet, for
@@ -146,10 +153,10 @@ verify the tarballs against the checksum file in its Hex package.
   the matrix builds drifted. Re-run the failed matrix job or
   re-trigger the whole workflow. The checksum command refuses to write
   out partial results.
-- **A build job fails with "which the archive does not bundle"** - the
-  NIF or a bundled library loads a library the tarball does not ship.
-  The error names the member and the load command. Most often the
-  runner has a new Homebrew or apt package that FFmpeg's configure
+- **The macOS build job fails with "which the archive does not
+  bundle"** - the NIF or a bundled library loads a library the tarball
+  does not ship. The error names the member and the load command. Most
+  often the runner has a new Homebrew package that FFmpeg's configure
   detects. Disable that feature in the configure call and bump the
   FFmpeg cache key suffix.
 - **Missing target after `checksum:download`** — confirm the target
