@@ -118,7 +118,7 @@ demuxers, which is exactly where the risk lives.
 ```elixir
 def deps do
   [
-    {:exmpeg, "~> 0.4"}
+    {:exmpeg, "~> 0.5"}
   ]
 end
 ```
