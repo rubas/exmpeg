@@ -522,6 +522,85 @@ defmodule Exmpeg.IntegrationTest do
     end
   end
 
+  test "transcode keeps a gap inside re-encoded audio in line with the video" do
+    # Both streams skip the second between 1 s and 2 s. The audio clock
+    # packed the samples after the gap straight onto the ones before it,
+    # so the audio ended a second early and ran ahead of the video.
+    src = Path.join(System.tmp_dir!(), "exmpeg_gap_#{System.unique_integer([:positive])}.mp4")
+    out = Path.join(System.tmp_dir!(), "exmpeg_gap_out_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=10:d=4) ++
+          ~w(-f lavfi -i sine=frequency=440:duration=4:sample_rate=48000) ++
+          ["-vf", "select='not(between(t,1,1.999))'", "-af", "aselect='not(between(t,1,1.999))'"] ++
+          ~w(-fps_mode passthrough -c:v libx264 -c:a aac #{src}),
+        env: %{}
+      )
+
+    assert {:ok, _} =
+             Exmpeg.transcode(src, out, video_codec: "libx264", audio_codec: "aac", video_filter: "null")
+
+    # The ffmpeg CLI gives the same packet times as the source.
+    audio = audio_packet_pts_times(out)
+    assert_in_delta List.last(audio), 3.989, 0.002
+
+    assert [[gap_start, gap_end]] =
+             audio |> Enum.chunk_every(2, 1, :discard) |> Enum.filter(fn [a, b] -> b - a > 0.5 end)
+
+    assert_in_delta gap_start, 0.981, 0.002
+    assert_in_delta gap_end, 2.005, 0.002
+    assert_in_delta out |> video_packet_pts_times() |> List.last(), 3.9, 0.002
+  end
+
+  test "transcode moves a negative container start to zero without cutting re-encoded audio" do
+    # The audio starts at -0.52 s. Its timestamps stayed negative, and the
+    # MP4 muxer cut the half second before zero.
+    src = Path.join(System.tmp_dir!(), "exmpeg_neg_#{System.unique_integer([:positive])}.mkv")
+    out = Path.join(System.tmp_dir!(), "exmpeg_neg_out_#{System.unique_integer([:positive])}.m4a")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i sine=frequency=440:duration=2:sample_rate=48000) ++
+          ~w(-c:a aac -output_ts_offset -0.5 -avoid_negative_ts disabled #{src}),
+        env: %{}
+      )
+
+    assert %{"audio" => src_start} = stream_start_times(src)
+    assert src_start < -0.5
+
+    assert {:ok, _} = Exmpeg.transcode(src, out, audio_codec: "aac")
+    assert %{"audio" => +0.0} = stream_start_times(out)
+    # The ffmpeg CLI gives 2.026 s.
+    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
+    assert_in_delta format.duration_s, 2.026, 0.01
+  end
+
+  test "transcode starts re-encoded Opus audio with the copied video" do
+    # The Opus decoder trims its priming samples but moved the frame
+    # timestamp only when it knew the packet time_base. The audio then
+    # started 7 ms early and the muxer shifted the video to 0.007 s.
+    src = Path.join(System.tmp_dir!(), "exmpeg_opus_#{System.unique_integer([:positive])}.webm")
+    out = Path.join(System.tmp_dir!(), "exmpeg_opus_out_#{System.unique_integer([:positive])}.mkv")
+    on_exit(fn -> Enum.each([src, out], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=80x60:r=30:d=2) ++
+          ~w(-f lavfi -i sine=frequency=440:duration=2:sample_rate=48000 -c:v libvpx-vp9 -c:a libopus #{src}),
+        env: %{}
+      )
+
+    assert {:ok, %{streams_copied: 1}} = Exmpeg.transcode(src, out, audio_codec: "pcm_s16le")
+    # The ffmpeg CLI starts both streams at 0 too.
+    assert %{"video" => +0.0, "audio" => +0.0} = stream_start_times(out)
+  end
+
   test "transcode mp4 -> webm with vp9 + opus", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_xc4_#{System.unique_integer([:positive])}.webm")
     on_exit(fn -> File.rm(out) end)
@@ -1222,14 +1301,18 @@ defmodule Exmpeg.IntegrationTest do
     end
   end
 
-  # Sorted presentation timestamps (seconds) of a file's video packets, read
-  # via ffprobe. The probe API exposes stream/format metadata but not
+  # Sorted presentation timestamps (seconds) of a file's video or audio
+  # packets, read via ffprobe. The probe API exposes stream/format metadata but not
   # per-packet timing, so concat boundary timing is asserted through this.
-  defp video_packet_pts_times(path) do
+  defp video_packet_pts_times(path), do: packet_pts_times(path, "v:0")
+
+  defp audio_packet_pts_times(path), do: packet_pts_times(path, "a:0")
+
+  defp packet_pts_times(path, stream) do
     {out, 0} =
       System.cmd(
         "ffprobe",
-        ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+        ["-v", "error", "-select_streams", stream, "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
         env: %{}
       )
 

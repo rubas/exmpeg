@@ -120,11 +120,54 @@ enum StreamPipeline {
         dst_layout: AVChannelLayout,
         dst_fmt: i32,
         dst_rate: i32,
-        /// Output pts of the next sample, in `1/dst_rate`. The first
-        /// decoded frame seeds it, so a stream that starts after the
-        /// container origin keeps its offset against the other streams.
-        next_pts: Option<i64>,
+        /// `None` until the first frame is decoded.
+        clock: Option<AudioClock>,
     },
+}
+
+/// Output timeline of a re-encoded audio stream. The first decoded frame
+/// seeds it, so a stream that starts after the container origin keeps
+/// its offset against the other streams, and a gap in the input moves it
+/// forward, so the audio after the gap stays in sync.
+struct AudioClock {
+    /// Output pts of the next sample the FIFO releases, in `1/dst_rate`.
+    next_pts: i64,
+    /// Input pts the next decoded frame has when the stream has no gap.
+    expected_in_pts: i64,
+}
+
+impl AudioClock {
+    /// Seed the clock from the first decoded frame at `ts`, or move it
+    /// over a gap before `ts`, then expect the next frame `duration`
+    /// input ticks later. A jump of more than one tick past the expected
+    /// pts is a gap, not rounding; the samples still in the FIFO move up
+    /// to it.
+    fn track(
+        slot: &mut Option<Self>,
+        ts: i64,
+        duration: i64,
+        in_tb: ffi::AVRational,
+        out_tb: ffi::AVRational,
+    ) -> &mut Self {
+        let known = ts != ffi::AV_NOPTS_VALUE;
+        let clock = slot.get_or_insert_with(|| Self {
+            next_pts: if known {
+                av_rescale_q(ts, in_tb, out_tb)
+            } else {
+                0
+            },
+            expected_in_pts: ts,
+        });
+        if known && clock.expected_in_pts != ffi::AV_NOPTS_VALUE && ts - clock.expected_in_pts > 1 {
+            clock.next_pts += av_rescale_q(ts - clock.expected_in_pts, in_tb, out_tb);
+        }
+        clock.expected_in_pts = if known {
+            ts + duration
+        } else {
+            ffi::AV_NOPTS_VALUE
+        };
+        clock
+    }
 }
 
 #[allow(clippy::too_many_lines)] // The transcode setup + drain loop is naturally linear.
@@ -601,7 +644,9 @@ fn build_audio_pipeline(
     })?;
     let mut decoder = AVCodecContext::new(&decoder_codec);
     decoder.apply_codecpar(codecpar)?;
-    decoder.set_time_base(in_tb);
+    // The decoder moves the timestamps of a frame it trims (Opus and AAC
+    // priming) only when it knows the packet time_base.
+    decoder.set_pkt_timebase(in_tb);
     decoder.open(None)?;
 
     let encoder_codec = find_encoder_by_name_owned(opts.audio_codec.as_deref().unwrap_or("aac"))?;
@@ -670,7 +715,7 @@ fn build_audio_pipeline(
         dst_layout,
         dst_fmt,
         dst_rate,
-        next_pts: None,
+        clock: None,
     })
 }
 
@@ -826,7 +871,7 @@ fn process_audio_packet(
         dst_layout,
         dst_fmt,
         dst_rate,
-        next_pts,
+        clock,
         ..
     } = pipeline
     else {
@@ -840,10 +885,17 @@ fn process_audio_packet(
             Err(RsmpegError::DecoderDrainError | RsmpegError::DecoderFlushedError) => break,
             Err(err) => return Err(err.into()),
         };
-        let pts = next_pts.get_or_insert_with(|| match frame.best_effort_timestamp {
-            ffi::AV_NOPTS_VALUE => 0,
-            ts => av_rescale_q(ts, *in_tb, encoder.time_base),
-        });
+        let clock = AudioClock::track(
+            clock,
+            frame.best_effort_timestamp,
+            av_rescale_q(
+                i64::from(frame.nb_samples),
+                ra(1, frame.sample_rate),
+                *in_tb,
+            ),
+            *in_tb,
+            encoder.time_base,
+        );
 
         let mut resampled =
             crate::audio::alloc_resample_frame(&frame, dst_layout, *dst_fmt, *dst_rate)?;
@@ -858,7 +910,7 @@ fn process_audio_packet(
             *dst_fmt,
             *dst_rate,
             dst_layout,
-            pts,
+            &mut clock.next_pts,
             encoder,
             output,
             *out_idx,
@@ -868,7 +920,8 @@ fn process_audio_packet(
         )?;
     }
 
-    if packet.is_none() {
+    // Without a decoded frame there is nothing in swresample or the FIFO.
+    if let (None, Some(clock)) = (packet, clock) {
         // Drain swresample, then flush the FIFO including a possibly
         // partial last frame.
         loop {
@@ -885,7 +938,7 @@ fn process_audio_packet(
             *dst_fmt,
             *dst_rate,
             dst_layout,
-            next_pts.get_or_insert(0),
+            &mut clock.next_pts,
             encoder,
             output,
             *out_idx,
@@ -1044,11 +1097,13 @@ fn to_cstring(path: &Path) -> Result<CString, NativeError> {
 }
 
 /// The container start time, rescaled from `AV_TIME_BASE` units into a
-/// stream's time_base, to subtract from every packet. `None` when the
-/// source already starts at zero or carries no start time, so the common
-/// case adds no work and no shift.
+/// stream's time_base, to subtract from every packet. A negative start
+/// moves the packets up, as the ffmpeg CLI does; a muxer would otherwise
+/// cut what lies before zero. `None` when the source already starts at
+/// zero or carries no start time, so the common case adds no work and no
+/// shift.
 fn start_offset_in_tb(start_time: i64, stream_tb: ffi::AVRational) -> Option<i64> {
-    if start_time == ffi::AV_NOPTS_VALUE || start_time <= 0 {
+    if start_time == ffi::AV_NOPTS_VALUE || start_time == 0 {
         return None;
     }
     let time_base_q = ffi::AVRational {
