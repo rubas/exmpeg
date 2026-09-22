@@ -22,6 +22,7 @@ use rsmpeg::swresample::SwrContext;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::atomic_output;
 use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
@@ -178,7 +179,7 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
     opts: &TranscodeOpts,
 ) -> Result<TranscodeStats, NativeError> {
     let output_path = output_path.as_ref();
-    let out_url = to_cstring(output_path)?;
+    let out_url = atomic_output::to_cstring(output_path)?;
 
     let mut input = source.open()?;
     let mut output = AVFormatContextOutput::create(&out_url)?;
@@ -1087,13 +1088,6 @@ fn round_even(n: i32) -> i32 {
     // <= 1. `1 & !1` is 0 (which is an invalid video dimension), so the
     // guard must catch 1 as well as 0 and negative values.
     if n <= 1 { 2 } else { n & !1 }
-}
-
-fn to_cstring(path: &Path) -> Result<CString, NativeError> {
-    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
-    })
 }
 
 /// The container start time, rescaled from `AV_TIME_BASE` units into a

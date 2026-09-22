@@ -17,6 +17,7 @@ use rsmpeg::swresample::SwrContext;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::atomic_output;
 use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
@@ -66,7 +67,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
         .map(str::to_ascii_lowercase);
     let encoder_codec = pick_encoder(ext.as_deref())?;
 
-    let out_url = to_cstring(output_path)?;
+    let out_url = atomic_output::to_cstring(output_path)?;
 
     let mut input = source.open()?;
     let (audio_index, decoder_codec) = find_audio_stream(&input)?;
@@ -474,11 +475,4 @@ fn find_audio_stream(
         )),
         Err(err) => Err(err.into()),
     }
-}
-
-fn to_cstring(path: &Path) -> Result<CString, NativeError> {
-    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
-    })
 }

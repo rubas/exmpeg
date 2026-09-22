@@ -15,7 +15,7 @@
 //! parameter sets per video stream. A parameter that the probe left
 //! unset is not compared. Mismatches return `:invalid_request`.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::path::Path;
 
 use rsmpeg::avcodec::AVCodecParameters;
@@ -25,6 +25,7 @@ use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::atomic_output;
 use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
@@ -64,7 +65,7 @@ pub(crate) fn concat<P: AsRef<Path>>(
     }
 
     let output_path = output_path.as_ref();
-    let out_url = to_cstring(output_path)?;
+    let out_url = atomic_output::to_cstring(output_path)?;
 
     // No muxer matches the output extension: surface `unsupported` rather
     // than the generic io_error `create` would otherwise produce.
@@ -433,11 +434,4 @@ fn codecpar_mismatch(
                 }),
             _ => None,
         })
-}
-
-fn to_cstring(path: &Path) -> Result<CString, NativeError> {
-    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
-    })
 }

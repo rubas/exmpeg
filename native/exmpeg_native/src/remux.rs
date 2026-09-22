@@ -3,7 +3,6 @@
 //! `ffmpeg -i in.mkv -c copy out.mp4` and the common
 //! `-ss START -t DURATION -c copy` cut-without-reencode pattern.
 
-use std::ffi::CString;
 use std::path::Path;
 
 use rsmpeg::avcodec::AVCodecParameters;
@@ -12,6 +11,7 @@ use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
 
+use crate::atomic_output;
 use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
@@ -71,7 +71,7 @@ pub(crate) fn remux<Q: AsRef<Path>>(
     opts: &RemuxOpts,
 ) -> Result<RemuxStats, NativeError> {
     let output_path = output_path.as_ref();
-    let out_url = to_cstring(output_path)?;
+    let out_url = atomic_output::to_cstring(output_path)?;
 
     let mut input = source.open()?;
 
@@ -236,13 +236,6 @@ pub(crate) fn remux<Q: AsRef<Path>>(
         packets_written,
         packets_dropped,
         streams_copied,
-    })
-}
-
-fn to_cstring(path: &Path) -> Result<CString, NativeError> {
-    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
     })
 }
 
