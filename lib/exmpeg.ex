@@ -383,10 +383,12 @@ defmodule Exmpeg do
   Every input must share the same stream layout (same number of streams
   and same codec id per stream index) and the same codec parameters: the
   same profile per stream, sample rate, sample format, and channel layout
-  per audio stream, and size and pixel format per video stream. Only the
-  time base may differ. Every input is checked before the first packet is written.
-  A mismatch returns `{:error, %Error{reason: :invalid_request}}` whose
-  details name the `"stream"` index and the `"field"`.
+  per audio stream, and size, pixel format, and MP4-style H.264 or HEVC
+  parameter sets per video stream. A parameter that the probe could not
+  read is not compared. Every input is checked before the first packet
+  is written. A mismatch returns `{:error, %Error{reason: :invalid_request}}`
+  whose details name the `"field"`, and the `"stream"` index for a
+  per-stream field.
 
   PTS / DTS values move from each input's own start time to the
   cumulative duration of the preceding inputs, so the output starts at

@@ -11,8 +11,9 @@
 //! All inputs must share the same stream layout (same number of streams,
 //! same codec id per stream index) and the same codec parameters: the
 //! same profile per stream, sample rate, sample format, and channel
-//! layout per audio stream, and size and pixel format per video stream.
-//! Only the time base may differ. Mismatches return `:invalid_request`.
+//! layout per audio stream, and size, pixel format, and H.264 or HEVC
+//! parameter sets per video stream. A parameter that the probe left
+//! unset is not compared. Mismatches return `:invalid_request`.
 
 use std::ffi::{CStr, CString};
 use std::path::Path;
@@ -318,6 +319,7 @@ fn assert_layout_matches(
             "input stream count does not match the first input",
         )
         .with_detail("path", path.to_owned())
+        .with_detail("field", "stream_count")
         .with_detail("expected", first.streams().len().to_string())
         .with_detail("got", input.streams().len().to_string()));
     }
@@ -338,29 +340,67 @@ fn assert_layout_matches(
 }
 
 /// The first codec parameter in which `got` differs from `expected`, as
-/// `(field, expected, got)`. Only the time base may differ between
-/// inputs: packets are rescaled, but their payloads are copied as they
-/// are.
+/// `(field, expected, got)`. Packets are rescaled to the output time
+/// base, but their payloads are copied as they are, so every parameter a
+/// decoder reads from the header must match. A parameter the probe left
+/// unset (unknown profile, zero size or rate, no format, no channels) is
+/// not compared, as `ffmpeg -f concat` joins such inputs.
 fn codecpar_mismatch(
     expected: &AVCodecParameters,
     got: &AVCodecParameters,
 ) -> Option<(&'static str, String, String)> {
-    let int = |field, e: i32, g: i32| (e != g).then(|| (field, e.to_string(), g.to_string()));
+    let known = |e: i32, g: i32, unset: i32| e != unset && g != unset && e != g;
+    let int = |field, e: i32, g: i32, unset| {
+        known(e, g, unset).then(|| (field, e.to_string(), g.to_string()))
+    };
     let named = |field, e: i32, g: i32, name: fn(i32) -> Option<&'static CStr>| {
         let show =
             |v: i32| name(v).map_or_else(|| v.to_string(), |c| c.to_string_lossy().into_owned());
-        (e != g).then(|| (field, show(e), show(g)))
+        known(e, g, -1).then(|| (field, show(e), show(g)))
     };
     let layout = |p: &AVCodecParameters| {
         p.ch_layout()
             .describe()
             .map_or_else(|_| String::new(), |c| c.to_string_lossy().into_owned())
     };
+    let (e_layout, g_layout) = (&expected.ch_layout, &got.ch_layout);
+    // A layout with unspecified order (a plain WAVEFORMATEX header) carries
+    // only a channel count, so it matches any layout with that count.
+    let layout_differs = if e_layout.order == ffi::AV_CHANNEL_ORDER_UNSPEC
+        || g_layout.order == ffi::AV_CHANNEL_ORDER_UNSPEC
+    {
+        known(e_layout.nb_channels, g_layout.nb_channels, 0)
+    } else {
+        !ffi_helpers::channel_layouts_equal(e_layout, g_layout)
+    };
+    // Stream copy keeps only the first input's out-of-band parameter sets
+    // (an avcC or hvcC record, version byte 1). Annex B extradata is not
+    // compared: those streams repeat their parameter sets in band.
+    let (e_extra, g_extra) = (
+        ffi_helpers::extradata(expected),
+        ffi_helpers::extradata(got),
+    );
+    let config_records = matches!(
+        expected.codec_id,
+        ffi::AV_CODEC_ID_H264 | ffi::AV_CODEC_ID_HEVC
+    ) && e_extra.first() == Some(&1)
+        && g_extra.first() == Some(&1);
 
-    int("codec_id", expected.codec_id as i32, got.codec_id as i32)
-        .or_else(|| int("profile", expected.profile, got.profile))
+    (expected.codec_id != got.codec_id)
+        .then(|| {
+            let name = |id| ffi_helpers::codec_name(id).to_string_lossy().into_owned();
+            ("codec_id", name(expected.codec_id), name(got.codec_id))
+        })
+        .or_else(|| {
+            int(
+                "profile",
+                expected.profile,
+                got.profile,
+                ffi::AV_PROFILE_UNKNOWN,
+            )
+        })
         .or_else(|| match expected.codec_type {
-            ffi::AVMEDIA_TYPE_AUDIO => int("sample_rate", expected.sample_rate, got.sample_rate)
+            ffi::AVMEDIA_TYPE_AUDIO => int("sample_rate", expected.sample_rate, got.sample_rate, 0)
                 .or_else(|| {
                     named(
                         "sample_format",
@@ -370,11 +410,10 @@ fn codecpar_mismatch(
                     )
                 })
                 .or_else(|| {
-                    (!ffi_helpers::channel_layouts_equal(&expected.ch_layout, &got.ch_layout))
-                        .then(|| ("channel_layout", layout(expected), layout(got)))
+                    layout_differs.then(|| ("channel_layout", layout(expected), layout(got)))
                 }),
-            ffi::AVMEDIA_TYPE_VIDEO => int("width", expected.width, got.width)
-                .or_else(|| int("height", expected.height, got.height))
+            ffi::AVMEDIA_TYPE_VIDEO => int("width", expected.width, got.width, 0)
+                .or_else(|| int("height", expected.height, got.height, 0))
                 .or_else(|| {
                     named(
                         "pixel_format",
@@ -382,6 +421,15 @@ fn codecpar_mismatch(
                         got.format,
                         get_pix_fmt_name,
                     )
+                })
+                .or_else(|| {
+                    (config_records && e_extra != g_extra).then(|| {
+                        (
+                            "extradata",
+                            format!("{e_extra:02x?}"),
+                            format!("{g_extra:02x?}"),
+                        )
+                    })
                 }),
             _ => None,
         })

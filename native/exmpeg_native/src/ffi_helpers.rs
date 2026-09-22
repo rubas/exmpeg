@@ -12,7 +12,7 @@
 
 #![allow(unsafe_code)]
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 use rsmpeg::avcodec::AVCodecParameters;
 use rsmpeg::avformat::AVFormatContextOutput;
@@ -44,6 +44,24 @@ pub(crate) fn channel_layouts_equal(a: &ffi::AVChannelLayout, b: &ffi::AVChannel
     // positive value when different, and a negative AVERROR on bad input;
     // only 0 counts as equal.
     unsafe { ffi::av_channel_layout_compare(a, b) == 0 }
+}
+
+/// The registered name of `id`, such as `h264` or `pcm_s16le`.
+pub(crate) fn codec_name(id: ffi::AVCodecID) -> &'static CStr {
+    // SAFETY: `avcodec_get_name` never returns NULL: it returns a static
+    // string from the codec descriptor table, or "unknown_codec".
+    unsafe { CStr::from_ptr(ffi::avcodec_get_name(id)) }
+}
+
+/// The out-of-band codec extradata of `params`, empty when it has none.
+pub(crate) fn extradata(params: &AVCodecParameters) -> &[u8] {
+    if params.extradata.is_null() || params.extradata_size <= 0 {
+        return &[];
+    }
+    // SAFETY: a non-NULL `extradata` points to at least `extradata_size`
+    // bytes owned by `params`, and the returned slice borrows `params`,
+    // so the bytes outlive it.
+    unsafe { std::slice::from_raw_parts(params.extradata, params.extradata_size as usize) }
 }
 
 /// Deep copy of `src` for a `set_ch_layout` setter, which takes
