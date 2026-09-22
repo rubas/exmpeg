@@ -119,4 +119,11 @@ mod tests {
             "invalid_request"
         );
     }
+
+    #[test]
+    fn resample_capacity_scales_by_rate_and_clamps_corrupt_input() {
+        assert_eq!(compute_resample_capacity(1024, 48_000, 16_000), 597);
+        assert_eq!(compute_resample_capacity(0, 44_100, 16_000), 4096);
+        assert_eq!(compute_resample_capacity(1024, 1, 192_000), 1 << 20);
+    }
 }
