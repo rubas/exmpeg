@@ -13,6 +13,16 @@
 //! error, which unwinds through `atomic_output::run` so the partial
 //! output is removed and no final file is produced.
 //!
+//! The guard does not cover the input open. rsmpeg's
+//! `AVFormatContextInput::builder().open()` runs `avformat_open_input`
+//! and `avformat_find_stream_info` in one call and gives no way to set
+//! `AVFormatContext::interrupt_callback` before it, so a dead caller
+//! cannot stop the open. FFmpeg's `probesize` (5 MB) and
+//! `analyzeduration` (5 s of media) defaults bound it. `probe` is only an
+//! open and takes no guard. A read that blocks in the kernel is not
+//! interruptible even with a callback. A real interrupt needs its own
+//! open in `ffi_helpers.rs` or an rsmpeg builder parameter.
+//!
 //! This is deliberately separate from `ProgressEmitter`: the emitter is
 //! a no-op when no subscriber is set, so its throttle state never
 //! advances in the common case and cannot carry a liveness check.
