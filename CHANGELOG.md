@@ -11,9 +11,13 @@
   Before, such a join succeeded and played wrong, for example PCM at
   44100 Hz joined with 48000 Hz. A parameter that the probe could not read
   is not compared. The error details name the `"field"`, `"expected"`, and
-  `"got"`, and the `"stream"` for a per-stream field. Concat checks every
-  input before it writes the output. To join such inputs, transcode them
-  to the same parameters first.
+  `"got"`, and the `"stream"` for a per-stream field. A stream count or
+  codec mismatch, which 0.4.1 already rejected, now also has the
+  `"field"` detail (`"stream_count"` or `"codec_id"`). A codec mismatch
+  gives codec names such as `"h264"` in `"expected"` and `"got"`, not
+  numeric codec ids. Concat checks every input before it writes the
+  output. To join such inputs, transcode them to the same parameters
+  first.
 - `transcode/3` output timestamps change. Video keeps the timestamps the
   source and the filter graph produce, and re-encoded audio starts at the
   timestamp of its first decoded frame. Before, video frames were
