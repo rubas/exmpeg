@@ -12,6 +12,14 @@ on:
 
 permissions: {}
 
+# One run per push branch or dispatched tag, from detect to release. A
+# push that lands during a release waits, then its detect sees the new
+# tag and skips. A dispatch groups by its tag, not by the branch it
+# started from, so two dispatched tags build side by side.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: "1.97.1"
@@ -22,14 +30,6 @@ jobs:
     name: Detect release target
     runs-on: ubuntu-24.04
     permissions: {}
-    concurrency:
-      # Prefer the workflow_dispatch tag over the branch name: `ref_name`
-      # is always set for manual dispatches (it carries the branch the
-      # workflow was launched from), so the previous `github.ref_name ||
-      # inputs.tag` ordering collapsed two distinct manual tag-builds
-      # from `main` into the same concurrency group.
-      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-detect
-      cancel-in-progress: false
     outputs:
       should_release: ${{ steps.resolve.outputs.should_release }}
       tag: ${{ steps.resolve.outputs.tag }}
@@ -105,9 +105,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read # checkout + build only; uploads go through the actions cache/artifacts API
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-build-${{ matrix.id }}
-      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -418,9 +415,6 @@ jobs:
   tag:
     name: Push release tag
     runs-on: ubuntu-24.04
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-tag
-      cancel-in-progress: false
     needs: [detect, build]
     # Gate the tag on build success: `detect` treats a tagged version as
     # released, so a tag without artefacts would block the retry push.
@@ -454,9 +448,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write # creates the GitHub release and uploads the tarballs
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-release
-      cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
