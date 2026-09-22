@@ -18,8 +18,10 @@
 //! and `avformat_find_stream_info` in one call and gives no way to set
 //! `AVFormatContext::interrupt_callback` before it, so a dead caller
 //! cannot stop the open. FFmpeg's `probesize` (5 MB) and
-//! `analyzeduration` (5 s of media) defaults bound it. `probe` is only an
-//! open and takes no guard. A read that blocks in the kernel is not
+//! `analyzeduration` (5 to 90 s of media, by format) defaults limit only
+//! the stream analysis. Nothing limits the header read in
+//! `avformat_open_input`: an mp4 `moov` index grows with the sample
+//! count. `probe` is only an open and takes no guard. A read that blocks in the kernel is not
 //! interruptible even with a callback. A real interrupt needs its own
 //! open in `ffi_helpers.rs` or an rsmpeg builder parameter.
 //!
