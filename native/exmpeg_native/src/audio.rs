@@ -5,6 +5,7 @@ use rsmpeg::avcodec::AVCodecRef;
 use rsmpeg::avutil::{AVChannelLayout, AVFrame};
 
 use crate::errors::NativeError;
+use crate::ffi_helpers;
 
 /// Resolve the target channel count for an audio re-encode.
 ///
@@ -58,7 +59,7 @@ pub(crate) fn alloc_resample_frame(
     dst.set_nb_samples(nb_samples);
     dst.set_sample_rate(sample_rate);
     dst.set_format(fmt);
-    dst.set_ch_layout(layout.clone().into_inner());
+    dst.set_ch_layout(ffi_helpers::copy_ch_layout(layout)?);
     dst.get_buffer(0)?;
     Ok(dst)
 }
@@ -72,7 +73,7 @@ pub(crate) fn empty_resample_frame(
     dst.set_nb_samples(4096);
     dst.set_sample_rate(sample_rate);
     dst.set_format(fmt);
-    dst.set_ch_layout(layout.clone().into_inner());
+    dst.set_ch_layout(ffi_helpers::copy_ch_layout(layout)?);
     dst.get_buffer(0)?;
     Ok(dst)
 }
