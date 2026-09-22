@@ -646,10 +646,22 @@ defmodule Exmpeg.IntegrationTest do
           do: Path.join(System.tmp_dir!(), "exmpeg_sar_#{System.unique_integer([:positive])}_#{name}")
 
     [same, square, setsar] = outs
-    on_exit(fn -> Enum.each([src | outs], &File.rm/1) end)
+    plain = Path.join(System.tmp_dir!(), "exmpeg_sar_plain_#{System.unique_integer([:positive])}.mp4")
+    container = Path.join(System.tmp_dir!(), "exmpeg_sar_container_#{System.unique_integer([:positive])}.mkv")
+    container_out = Path.join(System.tmp_dir!(), "exmpeg_sar_container_out_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, plain, container, container_out | outs], &File.rm/1) end)
 
     assert {:ok, _} = Exmpeg.transcode(src, same, video_codec: "libx264")
     assert video_aspect(same) == {"720x576", "64:45", "16:9"}
+
+    # A remux with -aspect sets the SAR only in the container, and the
+    # container wins over the bitstream's square pixels.
+    {_, 0} =
+      System.cmd("ffmpeg", ~w(-v error -y -f lavfi -i testsrc2=s=320x240:r=10:d=1 -c:v libx264 #{plain}), env: %{})
+
+    {_, 0} = System.cmd("ffmpeg", ~w(-v error -y -i #{plain} -c copy -aspect 16:9 #{container}), env: %{})
+    assert {:ok, _} = Exmpeg.transcode(container, container_out, video_codec: "libx264")
+    assert video_aspect(container_out) == {"320x240", "4:3", "16:9"}
 
     # A non-proportional resize keeps the display aspect ratio through
     # the SAR, as the `scale` filter and the ffmpeg CLI do.

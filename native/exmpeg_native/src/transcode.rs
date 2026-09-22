@@ -14,7 +14,7 @@ use std::path::Path;
 
 use rsmpeg::avcodec::{AVCodec, AVCodecContext, AVCodecRef};
 use rsmpeg::avfilter::{AVFilter, AVFilterGraph, AVFilterInOut};
-use rsmpeg::avformat::AVFormatContextOutput;
+use rsmpeg::avformat::{AVFormatContextOutput, AVStreamRef};
 use rsmpeg::avutil::{AVAudioFifo, AVChannelLayout, AVFrame, av_rescale_q};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
@@ -185,15 +185,7 @@ pub(crate) fn transcode<Q: AsRef<Path>>(
         // through the `if !want_reencode` branch above.
         match codec_type {
             ffi::AVMEDIA_TYPE_VIDEO => {
-                let pipeline = build_video_pipeline(
-                    &mut output,
-                    &codecpar,
-                    in_idx,
-                    in_tb,
-                    stream.guess_framerate(),
-                    global_header,
-                    opts,
-                )?;
+                let pipeline = build_video_pipeline(&mut output, stream, global_header, opts)?;
                 pipelines.push(pipeline);
                 streams_reencoded += 1;
             }
@@ -371,23 +363,20 @@ fn find_encoder_by_name_owned(name: &str) -> Result<AVCodecRef<'static>, NativeE
     })
 }
 
-/// `src_rate` is `av_guess_frame_rate` for the input stream. Unlike the
-/// decoder's `framerate`, it also sees a rate that only the container
-/// carries (FFV1, VP8/VP9, MJPEG, ProRes).
 fn build_video_pipeline(
     output: &mut AVFormatContextOutput,
-    codecpar: &rsmpeg::avcodec::AVCodecParametersRef<'_>,
-    in_idx: usize,
-    in_tb: ffi::AVRational,
-    src_rate: Option<ffi::AVRational>,
+    stream: &AVStreamRef<'_>,
     global_header: bool,
     opts: &TranscodeOpts,
 ) -> Result<StreamPipeline, NativeError> {
+    let in_idx = stream.index as usize;
+    let in_tb = stream.time_base;
+    let codecpar = stream.codecpar();
     let decoder_codec = AVCodec::find_decoder(codecpar.codec_id).ok_or_else(|| {
         NativeError::new("unsupported", "no decoder available for input video stream")
     })?;
     let mut decoder = AVCodecContext::new(&decoder_codec);
-    decoder.apply_codecpar(codecpar)?;
+    decoder.apply_codecpar(&codecpar)?;
     decoder.set_time_base(in_tb);
     decoder.open(None)?;
 
@@ -396,12 +385,24 @@ fn build_video_pipeline(
     let src_w = decoder.width;
     let src_h = decoder.height;
     let src_fmt = decoder.pix_fmt;
-    let src_sar = decoder.sample_aspect_ratio;
+    // The container SAR wins over the bitstream one, as in
+    // `av_guess_sample_aspect_ratio`: a remux with `-aspect` sets only the
+    // container.
+    let stream_sar = stream.sample_aspect_ratio;
+    let src_sar = if stream_sar.num > 0 {
+        stream_sar
+    } else {
+        decoder.sample_aspect_ratio
+    };
 
     let (heuristic_w, heuristic_h) = resolve_target_size(src_w, src_h, opts.width, opts.height);
     let dst_fmt = pick_pix_fmt(&encoder_codec, src_fmt);
 
-    let src_fps = src_rate
+    // `av_guess_frame_rate` also sees a rate that only the container
+    // carries (FFV1, VP8/VP9, MJPEG, ProRes); the decoder's `framerate`
+    // does not.
+    let src_fps = stream
+        .guess_framerate()
         .filter(|r| r.num > 0 && r.den > 0)
         .map_or((25, 1), |r| (r.num, r.den));
     let fps = opts.fps.unwrap_or(src_fps);
