@@ -441,6 +441,10 @@ defmodule Exmpeg do
     aspect ratio: when both are given in another proportion, the sample
     aspect ratio changes instead, as with the `ffmpeg` `scale` filter.
   - `:fps` - target framerate as `{num, den}`. Defaults to the source.
+  - `:video_filter` - an FFmpeg filter chain such as `"crop=iw:ih-8:0:4"`.
+    It replaces `:width`, `:height`, and `:fps`. The output keeps the
+    timestamps the chain produces; a frame whose timestamp does not
+    advance is dropped.
   - `:sample_rate` - target audio sample rate in Hz.
   - `:channels` - `1` (mono) or `2` (stereo). A mono or stereo source is
     carried through when omitted; a source with more than 2 channels
