@@ -5,7 +5,6 @@
 //! Replaces `ffmpeg -ss T -i in -frames:v 1 out.jpg`. Built entirely on
 //! rsmpeg's safe wrappers — no `unsafe` in this module.
 
-use std::ffi::CString;
 use std::path::Path;
 
 use rsmpeg::avcodec::{AVCodec, AVCodecContext};
@@ -16,6 +15,7 @@ use rsmpeg::ffi;
 use rsmpeg::swscale::SwsContext;
 use rustler::{Env, NifMap};
 
+use crate::atomic_output;
 use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 
@@ -54,7 +54,7 @@ pub(crate) fn extract_frame<Q: AsRef<Path>>(
     opts: &ExtractFrameOpts,
 ) -> Result<ExtractFrameStats, NativeError> {
     let output_path = output_path.as_ref();
-    let out_url = to_cstring(output_path)?;
+    let out_url = atomic_output::to_cstring(output_path)?;
 
     let mut input = source.open()?;
     let mut cancel = CancelGuard::new(env);
@@ -412,11 +412,4 @@ fn scale_frame(
     sws.scale_frame(&src, 0, src_h, &mut dst)?;
     dst.set_pts(src.pts);
     Ok(dst)
-}
-
-fn to_cstring(path: &Path) -> Result<CString, NativeError> {
-    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
-        NativeError::new("invalid_request", "path contains NUL bytes")
-            .with_detail("path", path.display().to_string())
-    })
 }

@@ -30,7 +30,7 @@
 //! mid-write can therefore leave a `<stem>.partial.*` sibling behind; it
 //! is never renamed onto the destination and can be swept by the caller.
 
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -82,6 +82,15 @@ where
 
     guard.disarm();
     Ok(value)
+}
+
+/// The C string libavformat opens `path` with. A path with a NUL byte
+/// has no C form and fails as `invalid_request`.
+pub(crate) fn to_cstring(path: &Path) -> Result<CString, NativeError> {
+    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_err| {
+        NativeError::new("invalid_request", "path contains NUL bytes")
+            .with_detail("path", path.display().to_string())
+    })
 }
 
 /// Removes the `.partial` file when dropped unless disarmed. This covers
