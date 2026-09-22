@@ -200,11 +200,17 @@ defmodule Exmpeg.IntegrationTest do
         env: %{}
       )
 
-    assert {:ok, stats} = Exmpeg.extract_audio(src, out)
+    assert {:ok, stats} = Exmpeg.extract_audio(src, out, progress: self())
     assert stats.codec == "pcm_s16le"
     assert stats.sample_rate == 44_100
     assert stats.channels == 2
     assert_in_delta stats.duration_s, 2.0, 0.1
+
+    # The WAV demuxer re-chunks on read, so ffprobe cannot count the muxed
+    # packets. A packet count sits between zero and the sample count.
+    last = [] |> drain_progress() |> List.last()
+    assert last.packets_written > 0
+    assert last.packets_written < stats.samples_written
 
     assert {:ok, %MediaInfo{format: format, streams: [audio]}} = Exmpeg.probe(out)
     assert_in_delta format.duration_s, 2.0, 0.1
@@ -765,8 +771,10 @@ defmodule Exmpeg.IntegrationTest do
     assert last.current_pts_s > 1.5
   end
 
-  test "extract_audio emits progress messages", %{clip: clip} do
-    out = Path.join(System.tmp_dir!(), "exmpeg_audio_progress_#{System.unique_integer([:positive])}.wav")
+  test "extract_audio progress counts muxed packets, not samples", %{clip: clip} do
+    # m4a keeps one sample entry per muxed packet, so ffprobe reads back
+    # the exact count. The WAV demuxer re-chunks on read and would not.
+    out = Path.join(System.tmp_dir!(), "exmpeg_audio_progress_#{System.unique_integer([:positive])}.m4a")
     on_exit(fn -> File.rm(out) end)
 
     parent = self()
@@ -776,13 +784,15 @@ defmodule Exmpeg.IntegrationTest do
         Exmpeg.extract_audio(clip, out, progress: parent)
       end)
 
-    {:ok, _stats} = Task.await(task, 60_000)
+    {:ok, stats} = Task.await(task, 60_000)
 
     msgs = drain_progress([])
     assert msgs != [], "expected at least one progress message"
     last = List.last(msgs)
     assert last.op == "extract_audio"
     assert last.total_duration_s > 1.5
+    assert last.packets_written == audio_packet_count(out)
+    assert last.packets_written < stats.samples_written
   end
 
   test "concat accepts memory inputs and emits progress", %{clip: clip} do
@@ -846,6 +856,29 @@ defmodule Exmpeg.IntegrationTest do
       end
     end)
     |> Enum.sort()
+  end
+
+  # Number of audio packets in a file, read via ffprobe.
+  defp audio_packet_count(path) do
+    {out, 0} =
+      System.cmd(
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-count_packets",
+          "-select_streams",
+          "a:0",
+          "-show_entries",
+          "stream=nb_read_packets",
+          "-of",
+          "csv=p=0",
+          path
+        ],
+        env: %{}
+      )
+
+    out |> String.trim() |> String.to_integer()
   end
 
   test "killing the caller mid-transcode cancels the NIF and removes the partial" do

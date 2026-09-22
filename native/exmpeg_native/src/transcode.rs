@@ -623,7 +623,7 @@ fn build_audio_pipeline(
     let dst_channels =
         crate::audio::resolve_channels(opts.channels, decoder.ch_layout.nb_channels)?;
     let dst_layout = AVChannelLayout::from_nb_channels(dst_channels);
-    let dst_fmt = pick_sample_fmt(&encoder_codec, decoder.sample_fmt);
+    let dst_fmt = crate::audio::pick_sample_fmt(&encoder_codec, decoder.sample_fmt);
 
     encoder.set_sample_rate(dst_rate);
     encoder.set_sample_fmt(dst_fmt);
@@ -814,7 +814,8 @@ fn process_audio_packet(
             Err(err) => return Err(err.into()),
         };
 
-        let mut resampled = alloc_resample_frame(&frame, dst_layout, *dst_fmt, *dst_rate)?;
+        let mut resampled =
+            crate::audio::alloc_resample_frame(&frame, dst_layout, *dst_fmt, *dst_rate)?;
         swr.convert_frame(Some(&frame), &mut resampled)?;
         if resampled.nb_samples > 0 {
             ffi_helpers::write_fifo_frame(fifo, &resampled)?;
@@ -840,7 +841,7 @@ fn process_audio_packet(
         // Drain swresample, then flush the FIFO including a possibly
         // partial last frame.
         loop {
-            let mut tail = empty_resample_frame(dst_layout, *dst_fmt, *dst_rate)?;
+            let mut tail = crate::audio::empty_resample_frame(dst_layout, *dst_fmt, *dst_rate)?;
             swr.convert_frame(None, &mut tail)?;
             if tail.nb_samples == 0 {
                 break;
@@ -968,65 +969,8 @@ fn write_drained_packets(
     Ok(())
 }
 
-fn alloc_resample_frame(
-    src: &AVFrame,
-    layout: &AVChannelLayout,
-    fmt: i32,
-    sample_rate: i32,
-) -> Result<AVFrame, NativeError> {
-    let nb_samples = compute_resample_capacity(src.nb_samples, src.sample_rate, sample_rate);
-    let mut dst = AVFrame::new();
-    dst.set_nb_samples(nb_samples);
-    dst.set_sample_rate(sample_rate);
-    dst.set_format(fmt);
-    dst.set_ch_layout(ffi_helpers::copy_ch_layout(layout)?);
-    dst.get_buffer(0)?;
-    Ok(dst)
-}
-
-/// Worst-case output sample count for a resample step, with a small
-/// margin so the FIFO never has to grow at write time. Computed in i64
-/// and clamped to a safe i32 ceiling: pathological inputs (e.g. a
-/// corrupt `src.sample_rate == 0` clamped to 1 with a high target
-/// rate) would otherwise overflow `as i32` and produce a negative
-/// `nb_samples` that crashes `AVFrame::get_buffer`.
-fn compute_resample_capacity(src_nb_samples: i32, src_rate: i32, dst_rate: i32) -> i32 {
-    const MAX_NB_SAMPLES: i64 = 1 << 20; // 1 Mi-samples is far past any real audio frame.
-    if src_nb_samples <= 0 {
-        return 4096;
-    }
-    let raw = i64::from(src_nb_samples) * i64::from(dst_rate.max(1)) / i64::from(src_rate.max(1));
-    raw.saturating_add(256).clamp(1, MAX_NB_SAMPLES) as i32
-}
-
-fn empty_resample_frame(
-    layout: &AVChannelLayout,
-    fmt: i32,
-    sample_rate: i32,
-) -> Result<AVFrame, NativeError> {
-    let mut dst = AVFrame::new();
-    dst.set_nb_samples(4096);
-    dst.set_sample_rate(sample_rate);
-    dst.set_format(fmt);
-    dst.set_ch_layout(ffi_helpers::copy_ch_layout(layout)?);
-    dst.get_buffer(0)?;
-    Ok(dst)
-}
-
 fn pick_pix_fmt(codec: &AVCodecRef<'static>, src: i32) -> i32 {
     if let Some(fmts) = codec.pix_fmts() {
-        if fmts.contains(&src) {
-            return src;
-        }
-        if let Some(first) = fmts.first() {
-            return *first;
-        }
-    }
-    src
-}
-
-fn pick_sample_fmt(codec: &AVCodecRef<'static>, src: i32) -> i32 {
-    if let Some(fmts) = codec.sample_fmts() {
         if fmts.contains(&src) {
             return src;
         }

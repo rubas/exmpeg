@@ -204,8 +204,18 @@ alive roughly every 100 ms. If the caller dies mid-operation (a `Task`
 timeout, a supervised shutdown, a disconnect) the native work stops at
 the next check, the partial output is removed, and the call resolves to
 `{:error, %Exmpeg.Error{reason: :cancelled}}` (which the dead caller
-never observes). The operation is uninterruptible between checks;
-`probe/1` is not cancellable.
+never observes). The operation is uninterruptible between checks.
+
+The checks run in the packet loops, so the open of an input cannot be
+cancelled. The open reads the container header (`avformat_open_input`)
+and then analyzes the streams (`avformat_find_stream_info`). The FFmpeg
+defaults limit only the analysis: about 5 MB of packets (`probesize`)
+and 5 to 90 s of media, by format (`analyzeduration`). Nothing limits the
+header read. An mp4 `moov` index, for example, grows with the sample
+count, so a long mp4 can read tens of MB before the analysis starts.
+`probe/1` is only this open, so it is not cancellable. A read that
+blocks in the kernel, for example on a stalled network mount, holds the
+dirty scheduler thread until it returns.
 
 ## Development
 
