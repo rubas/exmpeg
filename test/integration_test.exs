@@ -112,6 +112,35 @@ defmodule Exmpeg.IntegrationTest do
     assert_in_delta audio.duration_s, 1.0, 0.4
   end
 
+  test "remux with duration_s keeps the in-window B-frames and their references like ffmpeg -t -c copy" do
+    # Video decode order is pts 0.0 0.3 0.1 0.2 0.6 0.4 0.5 0.9 0.7 0.8.
+    # A cut at 0.8 s that ended the video on the first out-of-window pts
+    # lost the 0.7 frame (video only), or kept 0.7 without the 0.9
+    # P-frame it references (with audio still in the window).
+    src = Path.join(System.tmp_dir!(), "exmpeg_bframes_#{System.unique_integer([:positive])}.mp4")
+    out = Path.join(System.tmp_dir!(), "exmpeg_bframes_out_#{System.unique_integer([:positive])}.mp4")
+    cli = Path.join(System.tmp_dir!(), "exmpeg_bframes_cli_#{System.unique_integer([:positive])}.mp4")
+    on_exit(fn -> Enum.each([src, out, cli], &File.rm/1) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=64x48:r=10:d=2 -f lavfi -i sine=frequency=440:duration=2) ++
+          ~w(-c:v libx264 -x264-params bframes=2:b-adapt=0:keyint=30:scenecut=0 -c:a aac #{src}),
+        env: %{}
+      )
+
+    {_, 0} = System.cmd("ffmpeg", ~w(-v error -y -i #{src} -t 0.8 -c copy #{cli}), env: %{})
+    expected = video_packet_pts_times(cli)
+    in_window = src |> video_packet_pts_times() |> Enum.filter(&(&1 < 0.8))
+    assert in_window -- expected == []
+
+    for opts <- [[duration_s: 0.8], [duration_s: 0.8, drop_audio: true]] do
+      assert {:ok, _stats} = Exmpeg.remux(src, out, opts)
+      assert video_packet_pts_times(out) == expected
+    end
+  end
+
   test "remux to an unknown output extension returns :unsupported", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_bad_#{System.unique_integer([:positive])}.xyz")
     on_exit(fn -> File.rm(out) end)

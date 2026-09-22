@@ -251,7 +251,10 @@ defmodule Exmpeg do
   - `:start_s` - drop packets whose pts is earlier than this offset (in
     seconds). The result is not keyframe-aligned: video that does not
     start on a keyframe will be unplayable until the next keyframe.
-  - `:duration_s` - stop after this many seconds past `:start_s`.
+  - `:duration_s` - stop after this many seconds past `:start_s`. The
+    cut follows decode order, like `ffmpeg -t -c copy`: a video stream
+    with B-frames keeps its last reorder group whole, so it can end a few
+    frames past the window.
 
   ## Returns
 
