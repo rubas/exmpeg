@@ -9,9 +9,9 @@ permissions: {}
 
 env:
   MIX_ENV: test
-  ELIXIR_VERSION: "1.20.3"
-  OTP_VERSION: "29.0.5"
-  RUST_TOOLCHAIN: "1.97.1"
+  ELIXIR_VERSION: "1.20.4"
+  OTP_VERSION: "29.1.1"
+  RUST_TOOLCHAIN: "1.98.1"
   EXMPEG_BUILD: "1"
 
 jobs:
