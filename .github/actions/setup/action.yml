@@ -51,7 +51,7 @@ runs:
         otp-version: ${{ inputs.otp-version }}
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       with:
         toolchain: ${{ inputs.rust-toolchain }}
         components: ${{ inputs.rust-components }}
@@ -157,12 +157,11 @@ runs:
         restore-keys: |
           ${{ runner.os }}-${{ runner.arch }}-mix-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-
 
-    - name: Cache Cargo registry + git
+    - name: Cache Cargo registry
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cargo/registry
-          ~/.cargo/git
         key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ inputs.rust-toolchain }}-${{ hashFiles('native/exmpeg_native/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-${{ runner.arch }}-cargo-${{ inputs.rust-toolchain }}-
@@ -172,9 +171,9 @@ runs:
       with:
         path: |
           native/exmpeg_native/target
-        key: ${{ runner.os }}-${{ runner.arch }}-native-${{ inputs.rust-toolchain }}-${{ hashFiles('native/exmpeg_native/Cargo.lock') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-native-${{ inputs.rust-toolchain }}-ffmpeg-${{ inputs.ffmpeg-version }}-${{ hashFiles('native/exmpeg_native/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-${{ runner.arch }}-native-${{ inputs.rust-toolchain }}-
+          ${{ runner.os }}-${{ runner.arch }}-native-${{ inputs.rust-toolchain }}-ffmpeg-${{ inputs.ffmpeg-version }}-
 
     - name: Install Hex/Rebar + fetch deps
       shell: bash

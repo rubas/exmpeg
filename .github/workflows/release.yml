@@ -155,7 +155,7 @@ jobs:
 
       # dtolnay/rust-toolchain pins the exact toolchain + cross targets;
       # raw rustup scripting would lose that pinning and cross-target setup.
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master # zizmor: ignore[superfluous-actions]
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable # zizmor: ignore[superfluous-actions]
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
@@ -304,8 +304,8 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             native/exmpeg_native/target
-          key: release-${{ matrix.id }}-${{ hashFiles('native/exmpeg_native/Cargo.lock') }}
-          restore-keys: release-${{ matrix.id }}-
+          key: release-${{ matrix.id }}-ffmpeg-${{ env.FFMPEG_VERSION }}-${{ hashFiles('native/exmpeg_native/Cargo.lock') }}
+          restore-keys: release-${{ matrix.id }}-ffmpeg-${{ env.FFMPEG_VERSION }}-
 
       - name: Build NIF
         working-directory: native/exmpeg_native
