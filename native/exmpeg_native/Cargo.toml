@@ -2,9 +2,7 @@
 name = "exmpeg_native"
 version = "0.1.0"
 edition = "2024"
-# rustler 0.38 raised its MSRV to 1.91; the crate cannot build on older
-# toolchains.
-rust-version = "1.91"
+rust-version = "1.98"
 
 [lib]
 name = "exmpeg_native"

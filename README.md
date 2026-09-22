@@ -128,7 +128,7 @@ The published Hex package ships precompiled NIFs for common targets
 `aarch64-unknown-linux-gnu`); consumers do not need a Rust toolchain to
 use them.
 
-To build the NIF from source, install Rust 1.91 or newer and set
+To build the NIF from source, install Rust 1.98 or newer and set
 `EXMPEG_BUILD=1` before compiling.
 
 ## Build requirements
@@ -136,7 +136,7 @@ To build the NIF from source, install Rust 1.91 or newer and set
 - FFmpeg 8.x shared libraries on the linker / loader path. `rsmpeg`
   discovers them via `pkg-config`; set `FFMPEG_PKG_CONFIG_PATH` when
   building against a non-default install.
-- Rust 1.91+ for source builds.
+- Rust 1.98+ for source builds.
 - Elixir 1.17+ / OTP 26+ (the NIF targets Erlang NIF version 2.17).
 
 ## Runtime requirements (precompiled NIF consumers)
