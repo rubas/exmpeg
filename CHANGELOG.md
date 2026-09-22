@@ -1,16 +1,81 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-09-23
 
 ### Changed
 
-- Refresh the Hex and Cargo lockfiles. `earmark_parser` 1.4.44 to 1.4.46 and
-  `ex_slop` 0.4.3 to 0.4.4 are dev and test only. The runtime deps do not move:
-  `rustler_precompiled` stays 0.9.0 and `rustler` stays 0.38.0. The Cargo
-  lockfile takes compatible patch releases. The rsmpeg git pin does not change.
-- CI now uses Elixir 1.20.3 (was 1.20.2) and OTP 29.0.5 (was 29.0). This
-  applies to `ci.yml` and `security.yml`. `mix.exs` keeps
+- `concat/3` rejects inputs whose codec parameters differ. It returns
+  `{:error, %Exmpeg.Error{reason: :invalid_request}}` when a stream's
+  profile, sample rate, sample format, channel layout, size, pixel format,
+  or H.264/HEVC parameter sets (avcC or hvcC) differ from the first input.
+  Before, such a join succeeded and played wrong, for example PCM at
+  44100 Hz joined with 48000 Hz. A parameter that the probe could not read
+  is not compared. The error details name the `"field"`, `"expected"`, and
+  `"got"`, and the `"stream"` for a per-stream field. Concat checks every
+  input before it writes the output. To join such inputs, transcode them
+  to the same parameters first.
+- `transcode/3` output timestamps change. Video keeps the timestamps the
+  source and the filter graph produce, and re-encoded audio starts at the
+  timestamp of its first decoded frame. Before, video frames were
+  restamped at a fixed cadence and audio started at 0. The packet times now
+  match the `ffmpeg` CLI for the same command. A source with a negative
+  start time now gives output that starts at zero.
+- Source builds (`EXMPEG_BUILD=1`) require Rust 1.98 or newer (was 1.91).
+  Precompiled-NIF consumers are unaffected.
+- The precompiled NIFs bundle FFmpeg 8.1.3 (was 8.1). It includes upstream
+  bounds and overflow fixes in decoders and demuxers.
+- `remux/3` with `:duration_s` ends each stream on its decode timestamp,
+  like `ffmpeg -t -c copy`. A B-frame video stream keeps its in-window
+  frames and the frames they reference, so the cut can run a few frames
+  past the window.
+- `rsmpeg` resolves from crates.io (`=0.18.0`), not from a git revision. A
+  source build no longer fetches from GitHub.
+- CI uses Elixir 1.20.4, OTP 29.1.1, and Rust 1.98.1. `mix.exs` keeps
   `elixir: "~> 1.17"` as the minimum version.
+- Dev and test dependencies (`ex_doc`, `ex_dna`, `ex_slop`) and the Cargo
+  lockfile take compatible releases. The runtime deps do not move:
+  `rustler_precompiled` stays 0.9.0 and `rustler` stays 0.38.0.
+- The `:video_filter` option of `transcode/3` is documented.
+- The README states that the open of an input, and so `probe/1`, cannot be
+  cancelled. The FFmpeg defaults limit only the stream analysis, not the
+  container header read.
+
+### Fixed
+
+- The precompiled macOS (Apple Silicon) NIF loads again. It no longer
+  requires `libavdevice` or `libX11`, which the archive did not ship, and
+  every bundled library finds its siblings through `@loader_path`.
+- Audio re-encoding in `transcode/3` and `extract_audio/3` could abort the
+  VM with `free(): invalid pointer`. A channel layout was copied into
+  uninitialised memory.
+- `extract_audio/3` progress messages report the number of muxed packets
+  in `packets_written`, not the sample count.
+- `concat/3` moves each input from its own start time to the end of the
+  previous input. The output starts at zero and has no gap at a join,
+  also for MPEG-TS segments and MP4 files with an edit-list offset.
+- `transcode/3` checks for a dead caller while the video filter graph
+  drains, so a long `tpad` or `reverse` stops within about 100 ms.
+- `transcode/3` re-encodes into Matroska and other global-header
+  containers with out-of-band codec headers. libx264 into `.mkv` no longer
+  fails with `:io_error`.
+- `transcode/3` keeps a source frame rate that only the container carries
+  (FFV1, VP8, VP9, MJPEG, ProRes) instead of converting to 25 fps.
+- `transcode/3` and `extract_frame/3` keep the sample aspect ratio, also
+  one that only the container carries. A resize with both `:width` and
+  `:height` in another proportion keeps the display aspect ratio, as the
+  `ffmpeg` `scale` filter does.
+- `transcode/3` keeps the timestamps a custom `:video_filter` produces
+  (`setpts`, `select`, `tpad`, variable frame rate). A frame whose
+  timestamp does not advance is dropped, as in the `ffmpeg` CLI.
+- `transcode/3` re-encodes a raw H.264 stream that carries no timestamps.
+- `transcode/3` keeps the offset of a re-encoded audio or video stream
+  that starts later than the other streams, and keeps a gap inside
+  re-encoded audio in line with the video.
+
+### Removed
+
+- The Hex package no longer ships `usage-rules.md`. The `Exmpeg`
+  moduledoc documents the public API.
 
 ## 0.4.1 - 2026-06-17
 
