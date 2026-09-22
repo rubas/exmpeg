@@ -88,7 +88,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     let mut encoder = AVCodecContext::new(&encoder_codec);
     encoder.set_sample_rate(target_rate);
     encoder.set_sample_fmt(target_fmt);
-    encoder.set_ch_layout(target_layout.clone().into_inner());
+    encoder.set_ch_layout(ffi_helpers::copy_ch_layout(&target_layout)?);
     encoder.set_time_base(ffi::AVRational {
         num: 1,
         den: target_rate,
@@ -399,7 +399,7 @@ fn drain_fifo(
         frame.set_nb_samples(take);
         frame.set_sample_rate(sample_rate);
         frame.set_format(fmt);
-        frame.set_ch_layout(layout.clone().into_inner());
+        frame.set_ch_layout(ffi_helpers::copy_ch_layout(layout)?);
         frame.get_buffer(0)?;
         let read = ffi_helpers::read_fifo_into_frame(fifo, &mut frame, take)?;
         if read != take {
@@ -466,7 +466,7 @@ fn alloc_resample_frame(
     dst.set_nb_samples(nb_samples);
     dst.set_sample_rate(sample_rate);
     dst.set_format(fmt);
-    dst.set_ch_layout(layout.clone().into_inner());
+    dst.set_ch_layout(ffi_helpers::copy_ch_layout(layout)?);
     dst.get_buffer(0)?;
     Ok(dst)
 }
@@ -480,7 +480,7 @@ fn empty_resample_frame(
     dst.set_nb_samples(4096);
     dst.set_sample_rate(sample_rate);
     dst.set_format(fmt);
-    dst.set_ch_layout(layout.clone().into_inner());
+    dst.set_ch_layout(ffi_helpers::copy_ch_layout(layout)?);
     dst.get_buffer(0)?;
     Ok(dst)
 }
