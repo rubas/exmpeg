@@ -656,6 +656,40 @@ defmodule Exmpeg.IntegrationTest do
     assert msg =~ "stream"
   end
 
+  test "concat rejects inputs whose codec parameters differ and names the stream and field" do
+    dir = Path.join(System.tmp_dir!(), "exmpeg_concat_params_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    fixture = fn name, args ->
+      path = Path.join(dir, name)
+      {_, 0} = System.cmd("ffmpeg", ~w(-v error -y) ++ args ++ ~w(#{path}), env: %{})
+      path
+    end
+
+    sine = &~w(-f lavfi -i sine=frequency=440:duration=1:sample_rate=#{&1} -ac #{&2} -c:a pcm_s16le)
+    video = &~w(-f lavfi -i testsrc2=s=64x48:r=10:d=1 -c:v libx264 -profile:v #{&1} -pix_fmt yuv420p)
+    mono_44k = fixture.("mono_44k.wav", sine.(44_100, 1))
+    mono_48k = fixture.("mono_48k.wav", sine.(48_000, 1))
+    stereo_48k = fixture.("stereo_48k.wav", sine.(48_000, 2))
+    high = fixture.("high.mp4", video.("high"))
+    baseline = fixture.("baseline.mp4", video.("baseline"))
+
+    out = Path.join(dir, "joined.wav")
+    File.write!(out, "existing")
+
+    for {inputs, out, field} <- [
+          {[mono_44k, mono_48k], out, "sample_rate"},
+          {[mono_48k, stereo_48k], out, "channel_layout"},
+          {[high, baseline], Path.join(dir, "joined.mp4"), "profile"}
+        ] do
+      assert {:error, %Exmpeg.Error{reason: :invalid_request, details: %{"stream" => "0", "field" => ^field}}} =
+               Exmpeg.concat(inputs, out)
+    end
+
+    assert File.read!(out) == "existing"
+  end
+
   test "probe accepts {:memory, binary} input", %{clip: clip} do
     bytes = File.read!(clip)
     assert {:ok, %MediaInfo{format: format, streams: streams}} = Exmpeg.probe({:memory, bytes})

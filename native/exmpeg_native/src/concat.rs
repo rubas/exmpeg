@@ -5,14 +5,19 @@
 //! output, and pts/dts are shifted by the cumulative duration of the
 //! preceding inputs so the resulting timeline is monotonic.
 //!
+//! Every input is opened and checked before the first packet is written.
 //! All inputs must share the same stream layout (same number of streams,
-//! same codec id per stream index). Mismatches return `:invalid_request`.
+//! same codec id per stream index) and the same codec parameters: the
+//! same profile per stream, sample rate, sample format, and channel
+//! layout per audio stream, and size and pixel format per video stream.
+//! Only the time base may differ. Mismatches return `:invalid_request`.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::path::Path;
 
 use rsmpeg::avcodec::AVCodecParameters;
 use rsmpeg::avformat::{AVFormatContextInput, AVFormatContextOutput, AVOutputFormat};
+use rsmpeg::avutil::{get_pix_fmt_name, get_sample_fmt_name};
 use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
@@ -50,7 +55,6 @@ pub(crate) fn concat<P: AsRef<Path>>(
         ));
     }
 
-    let total_inputs = sources.len();
     let output_path = output_path.as_ref();
     let out_url = to_cstring(output_path)?;
 
@@ -65,30 +69,34 @@ pub(crate) fn concat<P: AsRef<Path>>(
 
     let mut output = AVFormatContextOutput::create(&out_url)?;
 
-    let mut sources = sources.into_iter();
-    let first_source = sources.next().expect("non-empty checked above");
-    let first_label = first_source.describe();
-    // Open the first input to mint the output's stream layout.
-    // Subsequent inputs reuse the layout; if they don't match we return
-    // early.
-    let mut first = first_source
-        .open()
-        .map_err(|e| e.with_detail("path", first_label.clone()))?;
+    // Open and check every input before the first packet is written:
+    // stream copy writes the first input's codec parameters into the
+    // output header, so a later input that differs would be corrupt.
+    let mut inputs = sources
+        .into_iter()
+        .map(|source| {
+            let label = source.describe();
+            let input = source
+                .open()
+                .map_err(|e| e.with_detail("path", label.clone()))?;
+            Ok((label, input))
+        })
+        .collect::<Result<Vec<_>, NativeError>>()?;
+    let first = &inputs[0].1;
+    for (label, input) in &inputs[1..] {
+        assert_layout_matches(first, input, label)?;
+    }
 
-    let mut codec_ids: Vec<ffi::AVCodecID> = Vec::new();
     for in_stream in first.streams() {
-        let codecpar = in_stream.codecpar();
         let mut new_codecpar = AVCodecParameters::new();
-        new_codecpar.copy(&codecpar);
+        new_codecpar.copy(&in_stream.codecpar());
         ffi_helpers::clear_codec_tag(&mut new_codecpar);
 
         let mut out_stream = output.new_stream();
         out_stream.set_codecpar(new_codecpar);
         out_stream.set_time_base(in_stream.time_base);
-
-        codec_ids.push(codecpar.codec_id);
     }
-    let streams_copied = codec_ids.len() as u32;
+    let streams_copied = first.streams().len();
 
     let mut header_opts = None;
     output
@@ -102,12 +110,12 @@ pub(crate) fn concat<P: AsRef<Path>>(
         output.streams().iter().map(|s| s.time_base).collect();
 
     // Cumulative offset per stream, in that stream's output time_base.
-    let mut pts_offset: Vec<i64> = vec![0; codec_ids.len()];
+    let mut pts_offset: Vec<i64> = vec![0; streams_copied];
     // Minimum dts the next packet of each stream must hit. Used to
     // patch over AAC encoder priming (negative pts) and other small
     // per-frame shifts that would otherwise produce a non-monotonic
     // dts at input boundaries.
-    let mut next_min_dts: Vec<i64> = vec![i64::MIN / 2; codec_ids.len()];
+    let mut next_min_dts: Vec<i64> = vec![i64::MIN / 2; streams_copied];
     let mut packets_written: u64 = 0;
     let mut total_duration_s: f64 = 0.0;
     // For concat the input duration is unknown up front (we'd need to
@@ -116,32 +124,9 @@ pub(crate) fn concat<P: AsRef<Path>>(
     let mut progress = ProgressEmitter::new(env, opts.progress, "concat", 0.0);
     let mut cancel = CancelGuard::new(env);
 
-    process_input(
-        &mut first,
-        &mut output,
-        &out_time_bases,
-        &pts_offset,
-        &mut next_min_dts,
-        &mut packets_written,
-        &mut cancel,
-    )?;
-    advance_offsets(
-        &first,
-        &out_time_bases,
-        &mut pts_offset,
-        &next_min_dts,
-        &mut total_duration_s,
-    );
-    progress.tick(packets_written, total_duration_s);
-
-    for next in sources {
-        let label = next.describe();
-        let mut input = next
-            .open()
-            .map_err(|e| e.with_detail("path", label.clone()))?;
-        assert_layout_matches(&input, &codec_ids, &label)?;
+    for (_, input) in &mut inputs {
         process_input(
-            &mut input,
+            input,
             &mut output,
             &out_time_bases,
             &pts_offset,
@@ -150,7 +135,7 @@ pub(crate) fn concat<P: AsRef<Path>>(
             &mut cancel,
         )?;
         advance_offsets(
-            &input,
+            input,
             &out_time_bases,
             &mut pts_offset,
             &next_min_dts,
@@ -164,8 +149,8 @@ pub(crate) fn concat<P: AsRef<Path>>(
 
     Ok(ConcatStats {
         packets_written,
-        inputs_joined: total_inputs as u32,
-        streams_copied,
+        inputs_joined: inputs.len() as u32,
+        streams_copied: streams_copied as u32,
         duration_s: total_duration_s,
     })
 }
@@ -300,34 +285,83 @@ fn advance_offsets(
 }
 
 fn assert_layout_matches(
+    first: &AVFormatContextInput,
     input: &AVFormatContextInput,
-    template: &[ffi::AVCodecID],
     path: &str,
 ) -> Result<(), NativeError> {
-    if input.streams().len() != template.len() {
+    if input.streams().len() != first.streams().len() {
         return Err(NativeError::new(
             "invalid_request",
             "input stream count does not match the first input",
         )
         .with_detail("path", path.to_owned())
-        .with_detail("expected", template.len().to_string())
+        .with_detail("expected", first.streams().len().to_string())
         .with_detail("got", input.streams().len().to_string()));
     }
-    for (idx, stream) in input.streams().iter().enumerate() {
-        let expected_codec = template[idx];
-        let got = stream.codecpar().codec_id;
-        if got != expected_codec {
+    for (idx, (a, b)) in first.streams().iter().zip(input.streams()).enumerate() {
+        if let Some((field, expected, got)) = codecpar_mismatch(&a.codecpar(), &b.codecpar()) {
             return Err(NativeError::new(
                 "invalid_request",
-                "input stream codec id does not match the first input",
+                format!("input stream {field} does not match the first input"),
             )
             .with_detail("path", path.to_owned())
             .with_detail("stream", idx.to_string())
-            .with_detail("expected", format!("{expected_codec:?}"))
-            .with_detail("got", format!("{got:?}")));
+            .with_detail("field", field)
+            .with_detail("expected", expected)
+            .with_detail("got", got));
         }
     }
     Ok(())
+}
+
+/// The first codec parameter in which `got` differs from `expected`, as
+/// `(field, expected, got)`. Only the time base may differ between
+/// inputs: packets are rescaled, but their payloads are copied as they
+/// are.
+fn codecpar_mismatch(
+    expected: &AVCodecParameters,
+    got: &AVCodecParameters,
+) -> Option<(&'static str, String, String)> {
+    let int = |field, e: i32, g: i32| (e != g).then(|| (field, e.to_string(), g.to_string()));
+    let named = |field, e: i32, g: i32, name: fn(i32) -> Option<&'static CStr>| {
+        let show =
+            |v: i32| name(v).map_or_else(|| v.to_string(), |c| c.to_string_lossy().into_owned());
+        (e != g).then(|| (field, show(e), show(g)))
+    };
+    let layout = |p: &AVCodecParameters| {
+        p.ch_layout()
+            .describe()
+            .map_or_else(|_| String::new(), |c| c.to_string_lossy().into_owned())
+    };
+
+    int("codec_id", expected.codec_id as i32, got.codec_id as i32)
+        .or_else(|| int("profile", expected.profile, got.profile))
+        .or_else(|| match expected.codec_type {
+            ffi::AVMEDIA_TYPE_AUDIO => int("sample_rate", expected.sample_rate, got.sample_rate)
+                .or_else(|| {
+                    named(
+                        "sample_format",
+                        expected.format,
+                        got.format,
+                        get_sample_fmt_name,
+                    )
+                })
+                .or_else(|| {
+                    (!ffi_helpers::channel_layouts_equal(&expected.ch_layout, &got.ch_layout))
+                        .then(|| ("channel_layout", layout(expected), layout(got)))
+                }),
+            ffi::AVMEDIA_TYPE_VIDEO => int("width", expected.width, got.width)
+                .or_else(|| int("height", expected.height, got.height))
+                .or_else(|| {
+                    named(
+                        "pixel_format",
+                        expected.format,
+                        got.format,
+                        get_pix_fmt_name,
+                    )
+                }),
+            _ => None,
+        })
 }
 
 fn to_cstring(path: &Path) -> Result<CString, NativeError> {

@@ -381,8 +381,12 @@ defmodule Exmpeg do
   Joins `inputs` into a single `output` without re-encoding.
 
   Every input must share the same stream layout (same number of streams
-  and same codec id per stream index). Mismatches return
-  `{:error, %Error{reason: :invalid_request}}`.
+  and same codec id per stream index) and the same codec parameters: the
+  same profile per stream, sample rate, sample format, and channel layout
+  per audio stream, and size and pixel format per video stream. Only the
+  time base may differ. Every input is checked before the first packet is written.
+  A mismatch returns `{:error, %Error{reason: :invalid_request}}` whose
+  details name the `"stream"` index and the `"field"`.
 
   PTS / DTS values are shifted by the cumulative duration of preceding
   inputs so the resulting timeline is monotonic.
