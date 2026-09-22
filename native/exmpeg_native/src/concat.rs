@@ -2,8 +2,9 @@
 //! re-encoding. Replaces `ffmpeg -f concat -i list.txt -c copy out`.
 //!
 //! Every input is opened in sequence, packets are stream-copied to the
-//! output, and pts/dts are shifted by the cumulative duration of the
-//! preceding inputs so the resulting timeline is monotonic.
+//! output, and pts/dts are moved from the input's own start time to the
+//! cumulative duration of the preceding inputs, so the resulting
+//! timeline starts at zero and has no gap at a join.
 //!
 //! Every input is opened and checked before the first packet is written.
 //! All inputs must share the same stream layout (same number of streams,
@@ -17,7 +18,7 @@ use std::path::Path;
 
 use rsmpeg::avcodec::AVCodecParameters;
 use rsmpeg::avformat::{AVFormatContextInput, AVFormatContextOutput, AVOutputFormat};
-use rsmpeg::avutil::{get_pix_fmt_name, get_sample_fmt_name};
+use rsmpeg::avutil::{av_rescale_q, get_pix_fmt_name, get_sample_fmt_name};
 use rsmpeg::ffi;
 use rustler::types::LocalPid;
 use rustler::{Env, NifMap};
@@ -26,6 +27,11 @@ use crate::cancel::CancelGuard;
 use crate::errors::NativeError;
 use crate::ffi_helpers;
 use crate::progress::ProgressEmitter;
+
+const AV_TIME_BASE_Q: ffi::AVRational = ffi::AVRational {
+    num: 1,
+    den: ffi::AV_TIME_BASE as i32,
+};
 
 #[derive(Default, NifMap)]
 pub(crate) struct ConcatOpts {
@@ -164,6 +170,21 @@ fn process_input(
     packets_written: &mut u64,
     cancel: &mut CancelGuard,
 ) -> Result<(), NativeError> {
+    // Move the input to a zero origin before the cumulative offset, as
+    // `ffmpeg -f concat` does. An MPEG-TS capture or an MP4 with an
+    // edit-list offset starts well after zero, and that start would
+    // otherwise stay in the join as a gap. One origin for the whole
+    // container, not one per stream, so the streams of an input keep
+    // their offsets to each other.
+    let start_time = if input.start_time == ffi::AV_NOPTS_VALUE {
+        0
+    } else {
+        input.start_time
+    };
+    let origin: Vec<i64> = out_time_bases
+        .iter()
+        .map(|&tb| av_rescale_q(start_time, AV_TIME_BASE_Q, tb))
+        .collect();
     while let Some(mut packet) = input.read_packet()? {
         cancel.check()?;
         let idx = packet.stream_index as usize;
@@ -179,7 +200,7 @@ fn process_input(
         // differ.
         packet.rescale_ts(in_tb, out_tb);
 
-        let offset = pts_offset[idx];
+        let offset = pts_offset[idx] - origin[idx];
         if packet.pts != ffi::AV_NOPTS_VALUE {
             packet.set_pts(packet.pts + offset);
         }

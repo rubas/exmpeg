@@ -388,8 +388,9 @@ defmodule Exmpeg do
   A mismatch returns `{:error, %Error{reason: :invalid_request}}` whose
   details name the `"stream"` index and the `"field"`.
 
-  PTS / DTS values are shifted by the cumulative duration of preceding
-  inputs so the resulting timeline is monotonic.
+  PTS / DTS values move from each input's own start time to the
+  cumulative duration of the preceding inputs, so the output starts at
+  zero and has no gap at a join, like `ffmpeg -f concat`.
 
   ## Returns
 

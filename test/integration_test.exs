@@ -297,6 +297,48 @@ defmodule Exmpeg.IntegrationTest do
     assert Enum.all?(gaps, &(&1 > 0.08 and &1 < 0.13))
   end
 
+  test "concat of MPEG-TS segments with non-zero start times joins them from zero like ffmpeg -f concat" do
+    # `-f segment` MPEG-TS segments keep the running source timestamps:
+    # the first starts near 1.6 s and the second near 3.4 s. Kept as is,
+    # those starts became a lead-in and a hole of about 2 s at the join.
+    dir = Path.join(System.tmp_dir!(), "exmpeg_tscat_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    {_, 0} =
+      System.cmd(
+        "ffmpeg",
+        ~w(-v error -y -f lavfi -i testsrc2=s=64x48:r=10:d=4 -f lavfi -i sine=frequency=440:duration=4) ++
+          ~w(-c:v libx264 -g 20 -c:a aac -f segment -segment_time 2 -segment_format mpegts #{dir}/seg%d.ts),
+        env: %{}
+      )
+
+    segments = [seg0, _seg1] = [Path.join(dir, "seg0.ts"), Path.join(dir, "seg1.ts")]
+    assert {:ok, %MediaInfo{format: %{start_time_s: start}}} = Exmpeg.probe(seg0)
+    assert start > 1.0
+
+    list = Path.join(dir, "list.txt")
+    File.write!(list, Enum.map_join(segments, &"file '#{&1}'\n"))
+    cli = Path.join(dir, "cli.mp4")
+    {_, 0} = System.cmd("ffmpeg", ~w(-v error -y -f concat -safe 0 -i #{list} -c copy #{cli}), env: %{})
+
+    out = Path.join(dir, "joined.mp4")
+    assert {:ok, stats} = Exmpeg.concat(segments, out)
+    assert {:ok, %MediaInfo{format: expected}} = Exmpeg.probe(cli)
+    assert {:ok, %MediaInfo{format: format}} = Exmpeg.probe(out)
+    assert_in_delta stats.duration_s, expected.duration_s, 0.05
+    assert_in_delta format.duration_s, expected.duration_s, 0.05
+
+    pts = video_packet_pts_times(out)
+    expected_pts = video_packet_pts_times(cli)
+    assert length(pts) == length(expected_pts)
+    assert hd(pts) < 0.1
+
+    for {got, want} <- Enum.zip(pts, expected_pts) do
+      assert_in_delta got, want, 0.01
+    end
+  end
+
   test "transcode re-encodes both streams with libx264 + aac", %{clip: clip} do
     out = Path.join(System.tmp_dir!(), "exmpeg_xc_#{System.unique_integer([:positive])}.mp4")
     on_exit(fn -> File.rm(out) end)
