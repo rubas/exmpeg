@@ -356,10 +356,16 @@ jobs:
           done
 
           # Make the bundle find its libraries next to itself rather
-          # than at the absolute prefix recorded by the linker.
+          # than at the absolute prefix recorded by the linker, then fail
+          # when it still loads a library from outside the archive.
+          ls -la "${STAGE}"
           if [ "$(uname)" = "Darwin" ]; then
             # macOS: give every image an @loader_path install name and
             # rewrite each load command under the FFmpeg prefix to one.
+            # Every name left must be a member of the archive, an OS
+            # library, or a codec formula README.md lists.
+            BREW_OPT="$(brew --prefix)/opt"
+            unbundled=0
             for image in "${STAGE}"/*; do
               [ -L "$image" ] && continue
               args=(-id "@loader_path/$(basename "$image")")
@@ -371,22 +377,9 @@ jobs:
                 esac
               done
               install_name_tool "${args[@]}" "$image"
-            done
-          else
-            patchelf --set-rpath '$ORIGIN' "${STAGE}/${LIB_NAME}"
-          fi
-
-          # Fail when the bundle loads a library the consumer does not
-          # have: every name must resolve inside the archive, to the OS,
-          # or (macOS) to a codec formula README.md lists.
-          ls -la "${STAGE}"
-          if [ "$(uname)" = "Darwin" ]; then
-            BREW_OPT="$(brew --prefix)/opt"
-            unbundled=0
-            for image in "${STAGE}"/*; do
-              [ -L "$image" ] && continue
-              otool -L "$image"
-              for dep in $(otool -L "$image" | awk 'NR > 1 {print $1}'); do
+              deps="$(otool -L "$image")"
+              echo "$deps"
+              for dep in $(echo "$deps" | awk 'NR > 1 {print $1}'); do
                 case "$dep" in
                   @loader_path/*) [ -e "${STAGE}/${dep#@loader_path/}" ] && continue ;;
                   /usr/lib/* | /System/Library/*) continue ;;
@@ -398,6 +391,10 @@ jobs:
             done
             [ "$unbundled" = 0 ] || exit 1
           else
+            # Linux: the NIF's RPATH is $ORIGIN. Without LD_LIBRARY_PATH,
+            # ldd must resolve every bundled FFmpeg library inside the
+            # archive.
+            patchelf --set-rpath '$ORIGIN' "${STAGE}/${LIB_NAME}"
             if env -u LD_LIBRARY_PATH ldd "${STAGE}/${LIB_NAME}" | grep 'not found' >&2; then
               exit 1
             fi
