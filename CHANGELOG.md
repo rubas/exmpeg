@@ -46,9 +46,10 @@
 
 ### Fixed
 
-- The precompiled macOS (Apple Silicon) NIF loads again. It no longer
-  requires `libavdevice` or `libX11`, which the archive did not ship, and
-  every bundled library finds its siblings through `@loader_path`.
+- The precompiled macOS (Apple Silicon) NIF loads again. The archive now
+  ships `libavdevice`, which the NIF loads. No bundled library loads
+  `libX11`, and every bundled library finds its siblings through
+  `@loader_path`.
 - Audio re-encoding in `transcode/3` and `extract_audio/3` could abort the
   VM with `free(): invalid pointer`. A channel layout was copied into
   uninitialised memory.

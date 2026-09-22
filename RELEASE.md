@@ -28,8 +28,8 @@ for every `<target>` listed in `lib/exmpeg/native.ex`'s
 
 ### Tarball contents
 
-Each tarball contains the NIF and the six FFmpeg shared libraries it
-loads at runtime:
+Each tarball contains the NIF and the seven FFmpeg shared libraries that
+`rusty_ffmpeg` links:
 
 ```
 libexmpeg_native-vX.Y.Z-nif-2.17-<target>.so   # NIF
@@ -39,14 +39,15 @@ libavutil.so.60   / libavutil.60.dylib
 libavfilter.so.11 / libavfilter.11.dylib
 libswscale.so.9   / libswscale.9.dylib
 libswresample.so.6 / libswresample.6.dylib
+libavdevice.so.62 / libavdevice.62.dylib
 ```
 
 The FFmpeg libs resolve relative to the extracted tarball without
 `LD_LIBRARY_PATH`. On Linux the NIF's RPATH is `$ORIGIN`. On macOS every
 install name in the tarball is `@loader_path/...`: the ID of each image
-and each load command that pointed at the FFmpeg prefix. The macOS link
-passes `-dead_strip_dylibs`, so the NIF does not load the unused
-`libavdevice` that `rusty_ffmpeg` links.
+and each load command that pointed at the FFmpeg prefix. The Linux NIF
+does not load `libavdevice`, because the linker drops it as unused. The
+macOS NIF loads it.
 
 The job checks the bundle before it packs the tarball. On Linux, `ldd`
 without `LD_LIBRARY_PATH` must resolve every library on the runner, so
@@ -59,9 +60,10 @@ a Homebrew codec formula (`lame`, `opus`, `libvpx`, `webp`).
 The bundled FFmpeg is built LGPL-only (no `--enable-gpl` /
 `--enable-libx264`) so the tarballs ship under the package's MIT
 license. It is also built with `--disable-xlib`, so no library loads
-libX11. Codec libraries (libmp3lame / libopus / libvpx / libwebp) are
-**not** bundled - consumers install them via their distro package
-manager. See README.md's "Runtime requirements" section for the per-OS
+libX11, and with `--disable-devices`, so `libavdevice` loads no capture
+or playback library. Codec libraries (libmp3lame / libopus / libvpx /
+libwebp) are **not** bundled - consumers install them via their distro
+package manager. See README.md's "Runtime requirements" section for the per-OS
 install commands.
 
 Add a new target by extending both `lib/exmpeg/native.ex` and the
