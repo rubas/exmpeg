@@ -12,6 +12,14 @@ on:
 
 permissions: {}
 
+# One run per push branch or dispatched tag, from detect to release. A
+# push that lands during a release waits, then its detect sees the new
+# tag and skips. A dispatch groups by its tag, not by the branch it
+# started from, so two dispatched tags build side by side.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: "1.97.1"
@@ -22,19 +30,10 @@ jobs:
     name: Detect release target
     runs-on: ubuntu-24.04
     permissions: {}
-    concurrency:
-      # Prefer the workflow_dispatch tag over the branch name: `ref_name`
-      # is always set for manual dispatches (it carries the branch the
-      # workflow was launched from), so the previous `github.ref_name ||
-      # inputs.tag` ordering collapsed two distinct manual tag-builds
-      # from `main` into the same concurrency group.
-      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-detect
-      cancel-in-progress: false
     outputs:
       should_release: ${{ steps.resolve.outputs.should_release }}
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
-      tag_exists: ${{ steps.resolve.outputs.tag_exists }}
       sha: ${{ steps.resolve.outputs.sha }}
       nif_version: ${{ steps.resolve.outputs.nif_version }}
     steps:
@@ -52,62 +51,51 @@ jobs:
           TRIGGER_SHA: ${{ github.sha }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Build the tagged commit, not the branch the run started from.
             TAG="$INPUT_TAG"
-            VERSION="${TAG#v}"
-            SHOULD_RELEASE=true
-          else
-            VERSION="$(sed -n 's/^  @version "\([^"]*\)"$/\1/p' mix.exs | head -n1)"
-            # A root commit (e.g. after a squashed history) has no parent,
-            # so `git show HEAD^` would fail under `set -e`. Treat a missing
-            # parent as "no previous version" so the release still fires.
-            if git rev-parse -q --verify "HEAD^" >/dev/null 2>&1; then
-              PREVIOUS_VERSION="$(git show HEAD^:mix.exs 2>/dev/null | sed -n 's/^  @version "\([^"]*\)"$/\1/p' | head -n1)"
-            else
-              PREVIOUS_VERSION=""
-            fi
-
-            if [ -z "$VERSION" ]; then
-              echo "Failed to read current mix.exs version" >&2
+            if ! SHA="$(git rev-parse -q --verify "refs/tags/$TAG^{commit}")"; then
+              echo "Tag $TAG does not exist" >&2
               exit 1
             fi
+          else
+            SHA="$TRIGGER_SHA"
+          fi
 
+          VERSION="$(git show "$SHA:mix.exs" | sed -n 's/^  @version "\([^"]*\)"$/\1/p' | head -n1)"
+          if [ -z "$VERSION" ]; then
+            echo "Failed to read the mix.exs version" >&2
+            exit 1
+          fi
+
+          NIF_VERSION="$(git show "$SHA:lib/exmpeg/native.ex" \
+            | sed -n 's/^[[:space:]]*nif_versions:[[:space:]]*\["\([^"]*\)"\].*$/\1/p' | head -n1)"
+          if [ -z "$NIF_VERSION" ]; then
+            echo "Failed to parse nif_versions from lib/exmpeg/native.ex" >&2
+            exit 1
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$TAG" != "v$VERSION" ]; then
+              echo "Tag $TAG has mix.exs version $VERSION" >&2
+              exit 1
+            fi
+            SHOULD_RELEASE=true
+          else
+            # Release every version that has no tag yet. The decision does
+            # not depend on the previous commit, so a push after a dropped
+            # or failed run still releases the version.
             TAG="v$VERSION"
-
-            if [ "$VERSION" = "$PREVIOUS_VERSION" ]; then
+            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
               SHOULD_RELEASE=false
             else
               SHOULD_RELEASE=true
             fi
           fi
 
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            TAG_EXISTS=true
-          else
-            TAG_EXISTS=false
-          fi
-
-          # On a plain push, never re-release a version that is already
-          # tagged. This is what stops every subsequent push to main from
-          # rebuilding and re-uploading the same release (the version
-          # comparison above can't catch it on a squashed root commit,
-          # which has no parent to diff against). A deliberate rebuild
-          # still works via the workflow_dispatch path.
-          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$TAG_EXISTS" = "true" ]; then
-            SHOULD_RELEASE=false
-          fi
-
-          NIF_VERSION="$(sed -n 's/^[[:space:]]*nif_versions:[[:space:]]*\["\([^"]*\)"\].*$/\1/p' \
-            lib/exmpeg/native.ex | head -n1)"
-          if [ -z "$NIF_VERSION" ]; then
-            echo "Failed to parse nif_versions from lib/exmpeg/native.ex" >&2
-            exit 1
-          fi
-
           echo "should_release=$SHOULD_RELEASE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag_exists=$TAG_EXISTS" >> "$GITHUB_OUTPUT"
-          echo "sha=$TRIGGER_SHA" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "nif_version=$NIF_VERSION" >> "$GITHUB_OUTPUT"
 
   build:
@@ -117,9 +105,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read # checkout + build only; uploads go through the actions cache/artifacts API
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-build-${{ matrix.id }}
-      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -165,11 +150,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.local/ffmpeg
-          # `lgpl-webp-v1` invalidates earlier caches that were built with
-          # `--enable-gpl --enable-libx264` or without libwebp. The bundled
-          # FFmpeg is LGPL-only (libmp3lame/libopus/libvpx/libwebp) so the
-          # precompiled tarballs can ship under the package's MIT license.
-          key: release-${{ runner.os }}-${{ runner.arch }}-ffmpeg-${{ env.FFMPEG_VERSION }}-lgpl-webp-v1
+          # Bump the suffix when the configure flags change, or the cached
+          # prefix hides the change. `v2` drops xlib.
+          key: release-${{ runner.os }}-${{ runner.arch }}-ffmpeg-${{ env.FFMPEG_VERSION }}-lgpl-webp-v2
 
       - name: Install build deps (Linux)
         if: runner.os == 'Linux'
@@ -258,6 +241,9 @@ jobs:
           # software encoding (libx264/libx265, GPL) is therefore not in
           # the precompiled binaries; consumers who need it build from
           # source (EXMPEG_BUILD=1) against their own GPL FFmpeg.
+          # `--disable-xlib`: configure detects the runner's Homebrew
+          # libX11 and links it into every library, but no consumer
+          # installs it.
           ./configure \
             --prefix="$PREFIX" \
             --disable-static \
@@ -266,6 +252,7 @@ jobs:
             --disable-doc \
             --disable-debug \
             --enable-pic \
+            --disable-xlib \
             --enable-libmp3lame \
             --enable-libopus \
             --enable-libvpx \
@@ -311,6 +298,9 @@ jobs:
         working-directory: native/exmpeg_native
         env:
           TARGET: ${{ matrix.target }}
+          # rusty_ffmpeg links all seven FFmpeg libraries. GNU ld drops the
+          # unused libavdevice as needed; ld64 keeps it unless told to.
+          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: "-C link-arg=-Wl,-dead_strip_dylibs"
         run: |
           cargo build --release --target "$TARGET"
 
@@ -365,32 +355,50 @@ jobs:
             fi
           done
 
-          # Patch the NIF so it looks for the bundled libs next to
-          # itself rather than at the absolute prefix recorded by the
-          # linker. `$ORIGIN` is the loader's literal-string placeholder
-          # for the directory containing the loaded ELF / Mach-O image.
-          if [ "$(uname)" = "Darwin" ]; then
-            # macOS: rewrite every absolute load command pointing at
-            # the FFmpeg prefix to a @loader_path one.
-            for dep in $(otool -L "${STAGE}/${LIB_NAME}" | awk 'NR > 1 {print $1}'); do
-              case "$dep" in
-                ${FFMPEG_PREFIX}/lib/*)
-                  install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" "${STAGE}/${LIB_NAME}"
-                  ;;
-              esac
-            done
-          else
-            patchelf --set-rpath '$ORIGIN' "${STAGE}/${LIB_NAME}"
-          fi
-
-          # Verify the bundle: every NEEDED / LC_LOAD_DYLIB pointing at
-          # FFmpeg should now resolve relative to the tarball.
-          if [ "$(uname)" = "Darwin" ]; then
-            otool -L "${STAGE}/${LIB_NAME}"
-          else
-            ldd "${STAGE}/${LIB_NAME}" || true
-          fi
+          # Make the bundle find its libraries next to itself rather
+          # than at the absolute prefix recorded by the linker, then fail
+          # when it still loads a library from outside the archive.
           ls -la "${STAGE}"
+          if [ "$(uname)" = "Darwin" ]; then
+            # macOS: give every image an @loader_path install name and
+            # rewrite each load command under the FFmpeg prefix to one.
+            # Every name left must be a member of the archive, an OS
+            # library, or a codec formula README.md lists.
+            BREW_OPT="$(brew --prefix)/opt"
+            unbundled=0
+            for image in "${STAGE}"/*; do
+              [ -L "$image" ] && continue
+              args=(-id "@loader_path/$(basename "$image")")
+              for dep in $(otool -L "$image" | awk 'NR > 1 {print $1}'); do
+                case "$dep" in
+                  "${FFMPEG_PREFIX}"/lib/*)
+                    args+=(-change "$dep" "@loader_path/$(basename "$dep")")
+                    ;;
+                esac
+              done
+              install_name_tool "${args[@]}" "$image"
+              deps="$(otool -L "$image")"
+              echo "$deps"
+              for dep in $(echo "$deps" | awk 'NR > 1 {print $1}'); do
+                case "$dep" in
+                  @loader_path/*) [ -e "${STAGE}/${dep#@loader_path/}" ] && continue ;;
+                  /usr/lib/* | /System/Library/*) continue ;;
+                  "$BREW_OPT"/lame/lib/* | "$BREW_OPT"/opus/lib/* | "$BREW_OPT"/libvpx/lib/* | "$BREW_OPT"/webp/lib/*) continue ;;
+                esac
+                echo "::error::$(basename "$image") loads $dep, which the archive does not bundle" >&2
+                unbundled=1
+              done
+            done
+            [ "$unbundled" = 0 ] || exit 1
+          else
+            # Linux: the NIF's RPATH is $ORIGIN. Without LD_LIBRARY_PATH,
+            # ldd must resolve every bundled FFmpeg library inside the
+            # archive.
+            patchelf --set-rpath '$ORIGIN' "${STAGE}/${LIB_NAME}"
+            if env -u LD_LIBRARY_PATH ldd "${STAGE}/${LIB_NAME}" | grep 'not found' >&2; then
+              exit 1
+            fi
+          fi
 
           tar -czf "${LIB_NAME}.tar.gz" -C "${STAGE}" .
 
@@ -404,15 +412,10 @@ jobs:
   tag:
     name: Push release tag
     runs-on: ubuntu-24.04
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-tag
-      cancel-in-progress: false
     needs: [detect, build]
-    # Gate the tag on build success so a failed matrix doesn't leave an
-    # orphan tag that blocks future automatic releases (the `detect`
-    # job otherwise treats `VERSION == PREVIOUS_VERSION` as "nothing
-    # to do" on the retry push).
-    if: github.event_name == 'push' && needs.detect.outputs.should_release == 'true' && needs.detect.outputs.tag_exists != 'true' && needs.build.result == 'success'
+    # Gate the tag on build success: `detect` treats a tagged version as
+    # released, so a tag without artefacts would block the retry push.
+    if: github.event_name == 'push' && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success'
     permissions:
       contents: write # creates and pushes the release tag
     steps:
@@ -442,9 +445,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write # creates the GitHub release and uploads the tarballs
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}-release
-      cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
