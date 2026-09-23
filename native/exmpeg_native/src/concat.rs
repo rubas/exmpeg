@@ -172,7 +172,7 @@ fn process_input(
     pts_offset: &[i64],
     next_min_dts: &mut [i64],
     packets_written: &mut u64,
-    cancel: &mut CancelGuard,
+    cancel: &mut CancelGuard<'_>,
 ) -> Result<(), NativeError> {
     // Move the input to a zero origin before the cumulative offset, as
     // `ffmpeg -f concat` does. An MPEG-TS capture or an MP4 with an

@@ -7,20 +7,14 @@
 //! sent unconditionally via `finish` so the caller sees the closing
 //! counts.
 //!
-//! Implementation note: `Env::send` from inside a NIF requires the
-//! calling NIF's env (a process-bound, scheduler-thread-managed env).
-//! `OwnedEnv::send_and_clear` panics on managed threads. We capture the
-//! raw `NIF_ENV` pointer from the entry-point env at construction time
-//! and reconstruct an `Env<'_>` for each emission. This is sound: the
-//! pointer is valid for the duration of the NIF call (Rustler
-//! guarantees this), and the emitter cannot outlive the call because
-//! the NIF function consumes ownership of it before returning.
+//! The emitter sends through the calling NIF's `Env<'a>`:
+//! `OwnedEnv::send_and_clear` panics on BEAM-managed threads. The lifetime
+//! keeps the emitter inside the NIF call.
 
 use std::time::{Duration, Instant};
 
 use rsmpeg::ffi;
 use rustler::types::LocalPid;
-use rustler::wrapper::NIF_ENV;
 use rustler::{Encoder, Env, NifMap};
 
 mod atoms {
@@ -47,26 +41,24 @@ pub(crate) struct ProgressUpdate {
     pub(crate) total_duration_s: f64,
 }
 
-pub(crate) struct ProgressEmitter {
-    inner: Option<Inner>,
+pub(crate) struct ProgressEmitter<'a> {
+    inner: Option<Inner<'a>>,
 }
 
-struct Inner {
+struct Inner<'a> {
     pid: LocalPid,
-    /// Raw `NIF_ENV` pointer for the calling process. Valid for the
-    /// lifetime of the NIF call that constructed this emitter.
-    env_ptr: NIF_ENV,
+    env: Env<'a>,
     op: &'static str,
     total_duration_s: f64,
     last_emit: Option<Instant>,
 }
 
-impl ProgressEmitter {
+impl<'a> ProgressEmitter<'a> {
     /// Build an emitter. `env` is the calling NIF's environment (used
     /// to send messages from the dirty-scheduler thread). `pid` is the
     /// BEAM pid messages go to; if `None`, the emitter is a no-op.
     pub(crate) fn new(
-        env: Env<'_>,
+        env: Env<'a>,
         pid: Option<LocalPid>,
         op: &'static str,
         total_duration_s: f64,
@@ -74,7 +66,7 @@ impl ProgressEmitter {
         Self {
             inner: pid.map(|pid| Inner {
                 pid,
-                env_ptr: env.as_c_arg(),
+                env,
                 op,
                 total_duration_s,
                 last_emit: None,
@@ -83,7 +75,7 @@ impl ProgressEmitter {
     }
 
     pub(crate) fn from_av_duration(
-        env: Env<'_>,
+        env: Env<'a>,
         pid: Option<LocalPid>,
         op: &'static str,
         av_duration_ticks: i64,
@@ -122,15 +114,17 @@ impl ProgressEmitter {
     }
 }
 
-fn send(inner: &Inner, packets_written: u64, current_pts_s: f64) {
+fn send(inner: &Inner<'_>, packets_written: u64, current_pts_s: f64) {
     let update = ProgressUpdate {
         op: inner.op.to_owned(),
         packets_written,
         current_pts_s,
         total_duration_s: inner.total_duration_s,
     };
-    let env = crate::ffi_helpers::reconstruct_env(inner.env_ptr);
     // Errors here are advisory: process gone, mailbox full, etc. Never
     // block a transcode on a slow subscriber.
-    let _ = env.send(&inner.pid, (atoms::exmpeg_progress(), update).encode(env));
+    let _ = inner.env.send(
+        &inner.pid,
+        (atoms::exmpeg_progress(), update).encode(inner.env),
+    );
 }

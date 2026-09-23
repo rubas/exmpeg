@@ -237,7 +237,7 @@ fn decode_target_frame(
     video_index: usize,
     time_base: ffi::AVRational,
     target_s: f64,
-    cancel: &mut CancelGuard,
+    cancel: &mut CancelGuard<'_>,
 ) -> Result<AVFrame, NativeError> {
     let target_pts =
         (target_s * f64::from(time_base.den) / f64::from(time_base.num)).round() as i64;

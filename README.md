@@ -60,9 +60,8 @@ info.format.duration_s
 The Rust crate is built on rsmpeg's safe wrappers with
 `#![deny(unsafe_code)]` at the root.
 `native/exmpeg_native/src/ffi_helpers.rs` is the only module that
-contains `unsafe`; everything else, including the progress emitter that
-reconstructs an `Env<'_>` through those helpers, stays outside it. The
-quarantined operations are the ones rsmpeg does not yet expose safely:
+contains `unsafe`; everything else stays outside it. The quarantined
+operations are the ones rsmpeg does not yet expose safely:
 
 - clearing `AVCodecParameters.codec_tag` (a single primitive store on a
   unique `&mut` borrow),
@@ -72,11 +71,7 @@ quarantined operations are the ones rsmpeg does not yet expose safely:
   `AVFormatContextOutput.metadata` (libavformat takes ownership),
 - comparing two raw `AVChannelLayout`s through
   `av_channel_layout_compare`, which reads both and keeps no pointer, to
-  decide whether audio extraction can skip resampling,
-- rebuilding an `Env<'_>` from the raw `NIF_ENV` captured at the entry
-  point, so a long-running operation can emit throttled
-  `{:exmpeg_progress, ...}` messages without an `OwnedEnv` (which panics
-  on dirty-scheduler threads).
+  decide whether audio extraction can skip resampling.
 
 Every `unsafe` block names its invariant in a `SAFETY:` comment, and unit
 tests in the same module exercise the round-trips.

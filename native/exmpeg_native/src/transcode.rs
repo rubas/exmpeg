@@ -726,7 +726,7 @@ fn process_video_packet(
     output: &mut AVFormatContextOutput,
     out_time_bases: &[ffi::AVRational],
     packets_written: &mut u64,
-    cancel: &mut CancelGuard,
+    cancel: &mut CancelGuard<'_>,
 ) -> Result<(), NativeError> {
     let StreamPipeline::Video {
         out_idx,
@@ -827,7 +827,7 @@ fn drain_filter_and_encode(
     out_time_bases: &[ffi::AVRational],
     last_out_pts: &mut i64,
     packets_written: &mut u64,
-    cancel: &mut CancelGuard,
+    cancel: &mut CancelGuard<'_>,
 ) -> Result<(), NativeError> {
     loop {
         cancel.check()?;
