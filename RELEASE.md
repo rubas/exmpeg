@@ -29,17 +29,18 @@ for every `<target>` listed in `lib/exmpeg/native.ex`'s
 ### Tarball contents
 
 Each tarball contains the NIF and the seven FFmpeg shared libraries that
-`rusty_ffmpeg` links:
+`rusty_ffmpeg` links, built from the FFmpeg release that `FFMPEG_VERSION`
+in `.github/workflows/release.yml` names (9.0.1):
 
 ```
 libexmpeg_native-vX.Y.Z-nif-2.17-<target>.so   # NIF
-libavformat.so.62 / libavformat.62.dylib
-libavcodec.so.62  / libavcodec.62.dylib
-libavutil.so.60   / libavutil.60.dylib
-libavfilter.so.11 / libavfilter.11.dylib
-libswscale.so.9   / libswscale.9.dylib
-libswresample.so.6 / libswresample.6.dylib
-libavdevice.so.62 / libavdevice.62.dylib
+libavformat.so.63   / libavformat.63.dylib
+libavcodec.so.63    / libavcodec.63.dylib
+libavutil.so.61     / libavutil.61.dylib
+libavfilter.so.12   / libavfilter.12.dylib
+libswscale.so.10    / libswscale.10.dylib
+libswresample.so.7  / libswresample.7.dylib
+libavdevice.so.63   / libavdevice.63.dylib
 ```
 
 The FFmpeg libs resolve relative to the extracted tarball without

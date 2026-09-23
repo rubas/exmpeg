@@ -1,5 +1,5 @@
 name: "Setup exmpeg build env"
-description: "System packages, Task, Elixir/OTP, Rust toolchain, FFmpeg 8 (built + cached), and the mix/cargo/native caches."
+description: "System packages, Task, Elixir/OTP, Rust toolchain, FFmpeg 9 (built + cached), and the mix/cargo/native caches."
 
 inputs:
   elixir-version:
@@ -18,7 +18,7 @@ inputs:
   ffmpeg-version:
     description: "FFmpeg release tag to build into ~/.local/ffmpeg"
     required: false
-    default: "8.1.3"
+    default: "9.0.1"
   cache-fixtures:
     description: "Set to 'true' to cache the integration-test fixtures"
     required: false
@@ -102,8 +102,8 @@ runs:
         PREFIX="$HOME/.local/ffmpeg"
         TMP="$(mktemp -d)"
         cd "$TMP"
-        # Ubuntu 24.04's apt ffmpeg is too old (6.x); rsmpeg pinned to
-        # ffmpeg 8 needs the headers + shared libs from a real 8.x
+        # Ubuntu 24.04's apt ffmpeg is too old (6.x); rsmpeg with the
+        # ffmpeg9 feature needs the headers + shared libs from a real 9.x
         # install. The codec flags enable the integration-test path
         # (libx264 / libmp3lame / libopus / libvpx-vp9 / libwebp).
         # `--enable-gpl --enable-version3` is required by libx264.

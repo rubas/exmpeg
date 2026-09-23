@@ -10,10 +10,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.38.0"
-# rsmpeg 0.18 binds against FFmpeg 8.x. The crate links against the system
+# Our rsmpeg fork binds against FFmpeg 9.x. The crate links against the system
 # ffmpeg libraries via pkg-config; FFMPEG_PKG_CONFIG_PATH can override the
 # discovery path when building against a non-default install.
-rsmpeg = { version = "=0.18.0", default-features = false, features = ["link_system_ffmpeg", "ffmpeg8"] }
+# TODO(revert: an rsmpeg release on crates.io carries FFmpeg 9 support and larksuite/rsmpeg#255): go back to the crates.io version.
+rsmpeg = { git = "https://github.com/rubas/rsmpeg", rev = "5055c6d5c1530a617473f416e2773ef65f32af3c", default-features = false, features = ["link_system_ffmpeg", "ffmpeg9"] }
 
 [features]
 default = []

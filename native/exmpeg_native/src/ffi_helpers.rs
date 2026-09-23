@@ -16,7 +16,7 @@ use std::ffi::{CStr, CString};
 
 use rsmpeg::avcodec::AVCodecParameters;
 use rsmpeg::avformat::AVFormatContextOutput;
-use rsmpeg::avutil::{AVAudioFifo, AVChannelLayout, AVDictionary, AVFrame};
+use rsmpeg::avutil::{AVAudioFifo, AVDictionary, AVFrame};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 
@@ -62,29 +62,6 @@ pub(crate) fn extradata(params: &AVCodecParameters) -> &[u8] {
     // bytes owned by `params`, and the returned slice borrows `params`,
     // so the bytes outlive it.
     unsafe { std::slice::from_raw_parts(params.extradata, params.extradata_size as usize) }
-}
-
-/// Deep copy of `src` for a `set_ch_layout` setter, which takes
-/// ownership. rsmpeg's `AVChannelLayout::clone` copies into uninitialised
-/// memory, and `av_channel_layout_copy` first uninitialises its
-/// destination: a garbage `order` of `AV_CHANNEL_ORDER_CUSTOM` makes it
-/// free a garbage pointer and abort the VM.
-///
-/// TODO(revert: an rsmpeg release carries larksuite/rsmpeg#255): go back
-/// to `layout.clone().into_inner()` at the call sites and delete this
-/// helper.
-pub(crate) fn copy_ch_layout(src: &AVChannelLayout) -> Result<ffi::AVChannelLayout, RsmpegError> {
-    // SAFETY: an all-zero `AVChannelLayout` is the documented `{0}`
-    // initialiser (UNSPEC order, no channels, no custom map), so the
-    // uninit inside `av_channel_layout_copy` frees nothing. `src` is a
-    // valid, initialised layout for the borrow, and the copy owns any
-    // custom map it allocates.
-    let mut dst: ffi::AVChannelLayout = unsafe { std::mem::zeroed() };
-    // SAFETY: see above; both pointers are valid for the call.
-    match unsafe { ffi::av_channel_layout_copy(&raw mut dst, src.as_ptr()) } {
-        0 => Ok(dst),
-        err => Err(RsmpegError::AVError(err)),
-    }
 }
 
 /// Zero the `codec_tag` field of an `AVCodecParameters` so the muxer
@@ -198,13 +175,6 @@ mod tests {
             }
             Some(CStr::from_ptr((*entry).value))
         }
-    }
-
-    #[test]
-    fn copy_ch_layout_returns_an_equal_layout() {
-        let stereo = AVChannelLayout::from_nb_channels(2);
-        let copy = copy_ch_layout(&stereo).expect("copy");
-        assert!(channel_layouts_equal(&copy, &stereo));
     }
 
     #[test]
