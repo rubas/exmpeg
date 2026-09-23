@@ -14,7 +14,8 @@
 - The precompiled NIFs bundle FFmpeg 9.0.1 (was 8.1.3). The bundled
   libraries have the new FFmpeg 9 major versions, for example
   `libavcodec.so.63` and `libavutil.so.61`. `Exmpeg.version/0` reports
-  FFmpeg 9.0.1.
+  the FFmpeg 9 library versions: `avformat` and `avcodec` 63.x and
+  `avutil` 61.x (was 62.x and 60.x).
 
 ## 0.5.0 - 2026-09-23
 
