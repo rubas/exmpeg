@@ -8,13 +8,13 @@
   # rsmpeg drives bindgen against the system FFmpeg headers. Bindgen
   # needs libclang plus the libc include path; pkg-config (provided by
   # the elixir module) locates the FFmpeg .pc files. rsmpeg binds
-  # FFmpeg 8, so pin `ffmpeg_8`: nixpkgs `ffmpeg` is FFmpeg 9.
+  # FFmpeg 9, which is the nixpkgs `ffmpeg`.
   #
   # `pkgs.glibc` is undefined on Darwin, so the glibc.dev package and
   # its BINDGEN env entry are gated to Linux. On Darwin the system SDK
   # headers cover the same role and bindgen finds them automatically.
   packages = [
-    pkgs.ffmpeg_8
+    pkgs.ffmpeg
     pkgs.libclang
   ]
   ++ lib.optional pkgs.stdenv.isLinux pkgs.glibc.dev;
