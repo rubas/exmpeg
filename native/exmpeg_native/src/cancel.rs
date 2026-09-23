@@ -33,7 +33,6 @@ use std::time::{Duration, Instant};
 
 use rustler::Env;
 use rustler::types::LocalPid;
-use rustler::wrapper::NIF_ENV;
 
 use crate::errors::NativeError;
 
@@ -43,22 +42,18 @@ const CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Watches whether the calling BEAM process is still alive so a
 /// long-running NIF can bail out when its caller dies.
-pub(crate) struct CancelGuard {
+pub(crate) struct CancelGuard<'a> {
     pid: LocalPid,
-    /// Raw `NIF_ENV` pointer for the calling process, reconstructed into
-    /// an `Env<'_>` for each liveness check the same way `ProgressEmitter`
-    /// reconstructs it to send messages. Valid for the lifetime of the
-    /// NIF call that constructed this guard.
-    env_ptr: NIF_ENV,
+    env: Env<'a>,
     last_check: Option<Instant>,
 }
 
-impl CancelGuard {
+impl<'a> CancelGuard<'a> {
     /// Capture the calling process from the entry-point env.
-    pub(crate) fn new(env: Env<'_>) -> Self {
+    pub(crate) fn new(env: Env<'a>) -> Self {
         Self {
             pid: env.pid(),
-            env_ptr: env.as_c_arg(),
+            env,
             last_check: None,
         }
     }
@@ -77,8 +72,7 @@ impl CancelGuard {
         }
         self.last_check = Some(now);
 
-        let env = crate::ffi_helpers::reconstruct_env(self.env_ptr);
-        if env.is_process_alive(self.pid) {
+        if self.env.is_process_alive(self.pid) {
             Ok(())
         } else {
             Err(NativeError::new(

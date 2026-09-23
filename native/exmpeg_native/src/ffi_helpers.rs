@@ -20,17 +20,6 @@ use rsmpeg::avutil::{AVAudioFifo, AVDictionary, AVFrame};
 use rsmpeg::error::RsmpegError;
 use rsmpeg::ffi;
 
-/// Reconstruct an `Env` struct from a raw `NIF_ENV` pointer.
-///
-/// SAFETY: The raw `NIF_ENV` pointer must be a valid environment pointer handed to the NIF
-/// by Rustler, and the returned `Env` must not outlive the NIF execution context.
-pub(crate) fn reconstruct_env<'a>(c_env: rustler::wrapper::NIF_ENV) -> rustler::Env<'a> {
-    // SAFETY: We assume the caller provides a valid `c_env` pointer from the NIF context.
-    // Creating an Env is unsafe because it lets the caller create arbitrary lifetime references,
-    // which is sound as long as the returned Env does not escape the NIF call.
-    unsafe { rustler::Env::new(&(), c_env) }
-}
-
 /// Whether two channel layouts are semantically identical - the same
 /// channels in the same positions (not just the same count). Returns
 /// `false` on the rare comparison error so callers fall back to the safe
