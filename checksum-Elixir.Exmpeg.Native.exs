@@ -1,5 +1,5 @@
 %{
-  "libexmpeg_native-v0.5.0-nif-2.17-aarch64-apple-darwin.so.tar.gz" => "sha256:63d0c03cf44fef079b094576bb37ff065286ddec298dccbb8aea5f61dea93e53",
-  "libexmpeg_native-v0.5.0-nif-2.17-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:7598ee875e1a765f93c73ec58d95e6830bebbe18433a55d4ac34680c53869f42",
-  "libexmpeg_native-v0.5.0-nif-2.17-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:00eaeb88913aa8011a7a35dd0dacd9f6959ff96861b41bba57455d9732b3ac56",
+  "libexmpeg_native-v0.6.0-nif-2.17-aarch64-apple-darwin.so.tar.gz" => "sha256:e675b842c2ec02acef41788570ed118d1fa90ba5047c52714941a75642636c78",
+  "libexmpeg_native-v0.6.0-nif-2.17-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:96a15f4abe872d39765d02d4fd02c7b0729cbac076ed628484e40e762f6e8c38",
+  "libexmpeg_native-v0.6.0-nif-2.17-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:1fed34526e53b608e83a7784df1a2334ee624538d7a2c1870480d81e7326060b",
 }
