@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0 - 2026-09-23
+
+### Changed
+
+- Breaking for source builds (`EXMPEG_BUILD=1`): the NIF now needs FFmpeg
+  9 shared libraries and no longer builds against FFmpeg 8. Install FFmpeg
+  9 and its dev packages before you compile. Precompiled-NIF consumers
+  are unaffected.
+- Source builds need access to GitHub again. `rsmpeg` comes from our fork
+  `rubas/rsmpeg` at a pinned revision, not from crates.io, until an rsmpeg
+  release on crates.io supports FFmpeg 9.
+- The precompiled NIFs bundle FFmpeg 9.0.1 (was 8.1.3). The bundled
+  libraries have the new FFmpeg 9 major versions, for example
+  `libavcodec.so.63` and `libavutil.so.61`. `Exmpeg.version/0` reports
+  the FFmpeg 9 library versions: `avformat` and `avcodec` 63.x and
+  `avutil` 61.x (was 62.x and 60.x).
+
 ## 0.5.0 - 2026-09-23
 
 ### Changed
