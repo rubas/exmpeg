@@ -69,6 +69,10 @@ pub(crate) fn extradata(params: &AVCodecParameters) -> &[u8] {
 /// memory, and `av_channel_layout_copy` first uninitialises its
 /// destination: a garbage `order` of `AV_CHANNEL_ORDER_CUSTOM` makes it
 /// free a garbage pointer and abort the VM.
+///
+/// TODO(revert: an rsmpeg release carries larksuite/rsmpeg#255): go back
+/// to `layout.clone().into_inner()` at the call sites and delete this
+/// helper.
 pub(crate) fn copy_ch_layout(src: &AVChannelLayout) -> Result<ffi::AVChannelLayout, RsmpegError> {
     // SAFETY: an all-zero `AVChannelLayout` is the documented `{0}`
     // initialiser (UNSPEC order, no channels, no custom map), so the
