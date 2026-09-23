@@ -133,20 +133,23 @@ To build the NIF from source, install Rust 1.98 or newer and set
 
 ## Build requirements
 
-- FFmpeg 8.x shared libraries on the linker / loader path. `rsmpeg`
+- FFmpeg 9.x shared libraries on the linker / loader path. `rsmpeg`
   discovers them via `pkg-config`; set `FFMPEG_PKG_CONFIG_PATH` when
   building against a non-default install.
+- Access to GitHub: the NIF builds on
+  [our rsmpeg fork](https://github.com/rubas/rsmpeg) until an rsmpeg
+  release on crates.io supports FFmpeg 9, so Cargo fetches it from there.
 - Rust 1.98+ for source builds.
 - Elixir 1.17+ / OTP 26+ (the NIF targets Erlang NIF version 2.17).
 
 ## Runtime requirements (precompiled NIF consumers)
 
 The published Hex package ships precompiled NIF tarballs that **bundle
-the seven FFmpeg shared libraries** (`libavformat`, `libavcodec`,
+the seven FFmpeg 9.0.1 shared libraries** (`libavformat`, `libavcodec`,
 `libavutil`, `libavfilter`, `libswscale`, `libswresample`, `libavdevice`)
 next to the NIF and use `$ORIGIN` / `@loader_path` so the loader finds
 them without `LD_LIBRARY_PATH` gymnastics. Consumers therefore do **not** need to
-install FFmpeg 8 separately.
+install FFmpeg 9 separately.
 
 The bundled FFmpeg is built **LGPL-only** (`--enable-libmp3lame
 --enable-libopus --enable-libvpx --enable-libwebp`, no `--enable-gpl`), so
@@ -155,7 +158,7 @@ license. H.264 / H.265 software encoding via `libx264` / `libx265` is GPL
 and is **not** in the precompiled binaries; calling `transcode/3` with
 `video_codec: "libx264"` (or `"libx265"`) on a precompiled install
 returns `{:error, %Error{reason: :unsupported}}`. To use them, build
-from source (`EXMPEG_BUILD=1`) against your own GPL-enabled FFmpeg 8.
+from source (`EXMPEG_BUILD=1`) against your own GPL-enabled FFmpeg 9.
 
 What is **not** bundled and must be on the host:
 
@@ -187,7 +190,7 @@ brew install lame opus libvpx webp
 ```
 
 Source builds (`EXMPEG_BUILD=1`) link directly against the system's
-FFmpeg 8 install and so behave like a normal `pkg-config` consumer:
+FFmpeg 9 install and so behave like a normal `pkg-config` consumer:
 they need the dev packages (`libavcodec-dev` & friends) at build time
 and the matching runtime libs at load time.
 

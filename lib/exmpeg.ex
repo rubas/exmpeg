@@ -121,7 +121,7 @@ defmodule Exmpeg do
   The GPL H.264 / H.265 encoders (`"libx264"`, `"libx265"`) are not
   compiled into the precompiled (LGPL) binaries and return
   `{:error, %Exmpeg.Error{reason: :unsupported}}` there; build from
-  source (`EXMPEG_BUILD=1`) against a GPL-enabled FFmpeg 8 to use them.
+  source (`EXMPEG_BUILD=1`) against a GPL-enabled FFmpeg 9 to use them.
   """
   @type transcode_opt ::
           {:video_codec, String.t()}

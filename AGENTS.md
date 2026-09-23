@@ -1,6 +1,6 @@
 # exmpeg
 
-A Rustler NIF over `rsmpeg` (FFmpeg 8) that replaces shelling out to the
+A Rustler NIF over `rsmpeg` (FFmpeg 9) that replaces shelling out to the
 `ffmpeg` / `ffprobe` CLIs. It ships on Hex with precompiled NIFs, so the
 public API, the option validators, and the error taxonomy are a contract
 with strangers.
@@ -63,9 +63,13 @@ private to the library. Stub names match the Rust NIF symbols verbatim.
 - Every input opens with FFmpeg's `protocol_whitelist` pinned:
   `file,crypto,data` for a path, `crypto,data` for `{:memory, _}` and for
   a loaded buffer.
+- `rsmpeg` comes from our fork `rubas/rsmpeg` at a pinned `rev`, because
+  no crates.io release supports FFmpeg 9 yet. The `TODO(revert: ...)` in
+  `native/exmpeg_native/Cargo.toml` names the condition to go back.
+  `task upgrade` skips a git dependency, so move the `rev` by hand.
 - The precompiled binaries link an LGPL FFmpeg, so `libx264` and
   `libx265` return `:unsupported` there. A source build against a
-  GPL-enabled FFmpeg 8 gets them.
+  GPL-enabled FFmpeg 9 gets them.
 
 ## Add an operation
 
