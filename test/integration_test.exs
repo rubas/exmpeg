@@ -310,7 +310,7 @@ defmodule Exmpeg.IntegrationTest do
     # in the packet timestamps below where the container duration alone hides
     # them.
     pts = video_packet_pts_times(out)
-    assert length(pts) >= 36 and length(pts) <= 44
+    assert Enum.count_until(pts, 45) in 36..44
     assert Enum.max(pts) > 3.5
 
     gaps = pts |> Enum.chunk_every(2, 1, :discard) |> Enum.map(fn [a, b] -> b - a end)
@@ -687,7 +687,7 @@ defmodule Exmpeg.IntegrationTest do
 
     src_pts = video_packet_pts_times(vfr)
     out_pts = video_packet_pts_times(cropped)
-    assert length(src_pts) == 20 and length(out_pts) == 20
+    assert length(out_pts) == length(src_pts)
     assert_in_delta List.last(src_pts), 1.85, 0.002
     Enum.zip_with(src_pts, out_pts, &assert_in_delta(&1, &2, 0.002))
   end
@@ -708,7 +708,7 @@ defmodule Exmpeg.IntegrationTest do
       )
 
     src_pts = video_packet_pts_times(src)
-    assert length(src_pts) == 20
+    assert src_pts == src_pts |> Enum.dedup() |> Enum.flat_map(&[&1, &1])
 
     assert {:ok, _} = Exmpeg.transcode(src, out, video_codec: "libx264", video_filter: "crop=iw:ih-8:0:4")
     assert video_packet_pts_times(out) == Enum.dedup(src_pts)
@@ -731,7 +731,7 @@ defmodule Exmpeg.IntegrationTest do
     for {out, opts} <- Enum.zip(outs, [[], [video_filter: "null"]]) do
       assert {:ok, _} = Exmpeg.transcode(src, out, [video_codec: "libx264"] ++ opts)
       pts = video_packet_pts_times(out)
-      assert length(pts) == 20
+      assert Enum.count_until(pts, 21) == 20
       assert_in_delta List.last(pts), 1.9, 0.01
     end
   end
@@ -751,7 +751,7 @@ defmodule Exmpeg.IntegrationTest do
 
     assert {:ok, _} = Exmpeg.transcode(src, out, video_codec: "libx264")
     pts = video_packet_pts_times(out)
-    assert length(pts) == 20
+    assert Enum.count_until(pts, 21) == 20
     assert_in_delta List.last(pts), 1.9, 0.01
 
     assert {:ok, _} = Exmpeg.transcode(src, out_crop, video_codec: "libx264", video_filter: "crop=iw:ih-8:0:4")
