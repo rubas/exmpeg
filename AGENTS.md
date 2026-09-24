@@ -22,8 +22,14 @@ change to a demux, mux, or codec path. CI runs it on every pull request
 and on every push to `main`.
 
 The first `task compile` builds the NIF from source and takes several
-minutes. devenv sets `EXMPEG_BUILD=1`, so a local build never pulls a
-precompiled artefact.
+minutes. The Taskfile sets `EXMPEG_BUILD=1`, so a local build never pulls
+a precompiled artefact.
+
+The toolchain comes from the host: the Elixir, OTP, and Rust versions in
+`.github/workflows/ci.yml`, plus FFmpeg 9 with its headers, `pkg-config`,
+and libclang for bindgen. On Arch that is `pacman -S ffmpeg clang`. A
+distro with an older FFmpeg builds 9 from source the way
+`.github/actions/setup/action.yml` does.
 
 ## Layout
 
