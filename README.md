@@ -134,7 +134,8 @@ To build the NIF from source, install Rust 1.98 or newer and set
 - Access to GitHub: the NIF builds on
   [our rsmpeg fork](https://github.com/rubas/rsmpeg) until an rsmpeg
   release on crates.io supports FFmpeg 9, so Cargo fetches it from there.
-- Rust 1.98+ for source builds.
+- Rust 1.98+ for source builds, and libclang for `bindgen`. Set
+  `LIBCLANG_PATH` when libclang is not in a default library path.
 - Elixir 1.17+ / OTP 26+ (the NIF targets Erlang NIF version 2.17).
 
 ## Runtime requirements (precompiled NIF consumers)

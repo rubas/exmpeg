@@ -4,6 +4,11 @@ version: "3"
 vars:
   CARGO_MANIFEST: native/exmpeg_native/Cargo.toml
 
+# Local builds compile the NIF from source; only Hex consumers fetch a
+# precompiled artefact.
+env:
+  EXMPEG_BUILD: "1"
+
 tasks:
   setup:
     desc: Install Elixir deps
