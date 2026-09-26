@@ -11,10 +11,6 @@ release flow.
 
 ## Gates
 
-`task check` is the default gate: format check, compile with
-`--warnings-as-errors`, credo strict, clippy with `-D warnings`, Elixir
-unit tests, Rust tests, and zizmor over the workflows.
-
 `task test:integration` is the expensive one. It builds fixtures with the
 `ffmpeg` CLI and asserts packet timing with `ffprobe`, so both must be on
 `PATH`; each test skips itself when one is missing. Run it after any
@@ -32,15 +28,6 @@ distro with an older FFmpeg builds 9 from source the way
 `.github/actions/setup/action.yml` does.
 
 ## Layout
-
-`native/exmpeg_native/src/` holds one file per operation plus shared
-modules each operation pulls in as it needs them: `input.rs` (path,
-`{:memory, _}`, and buffer sources), `atomic_output.rs` (partial file
-plus rename, and the output path as a C string), `cancel.rs`
-(caller-liveness checks), `progress.rs` (throttled progress messages),
-`audio.rs` (resampling helpers), and `ffi_helpers.rs`. A read-only
-operation uses few of them: `nif_probe` takes none but `input.rs`, and
-`nif_version` and `nif_load_buffer` take none at all.
 
 `lib/exmpeg/native.ex` holds the `rustler_precompiled` stubs and stays
 private to the library. Stub names match the Rust NIF symbols verbatim.
