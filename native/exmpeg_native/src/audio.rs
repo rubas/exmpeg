@@ -1,8 +1,9 @@
 //! Shared helpers for the audio re-encode paths (`extract_audio`,
 //! `transcode`).
 
-use rsmpeg::avcodec::AVCodecRef;
+use rsmpeg::avcodec::{AVCodecContext, AVCodecRef};
 use rsmpeg::avutil::{AVChannelLayout, AVFrame};
+use rsmpeg::ffi;
 
 use crate::errors::NativeError;
 
@@ -33,6 +34,18 @@ pub(crate) fn resolve_channels(requested: Option<i32>, src: i32) -> Result<i32, 
         );
     }
     Ok(target)
+}
+
+/// Give a decoder whose channel order is unspecified (a plain WAV) the
+/// default layout for its channel count, as the ffmpeg CLI does. Call it
+/// between `apply_codecpar` and `open`. Otherwise `swr_init` normalises
+/// its input layout to that default, and `swr_convert_frame` rejects
+/// every decoded frame with `AVERROR_INPUT_CHANGED`.
+pub(crate) fn default_unspecified_layout(decoder: &mut AVCodecContext) {
+    if decoder.ch_layout.order == ffi::AV_CHANNEL_ORDER_UNSPEC {
+        let layout = AVChannelLayout::from_nb_channels(decoder.ch_layout.nb_channels);
+        decoder.set_ch_layout(layout.into_inner());
+    }
 }
 
 pub(crate) fn pick_sample_fmt(codec: &AVCodecRef<'static>, src: i32) -> i32 {

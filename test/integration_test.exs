@@ -971,6 +971,35 @@ defmodule Exmpeg.IntegrationTest do
     end
   end
 
+  # The audio-only fixture is a plain mono WAV, so its channel layout is
+  # unspecified. The next three tests re-encode it.
+  test "extract_audio re-encodes a mono 44.1 kHz WAV to mp3" do
+    wav = TestFixtures.ensure_audio_only_clip!()
+    out = Path.join(System.tmp_dir!(), "exmpeg_wav_mp3_#{System.unique_integer([:positive])}.mp3")
+    on_exit(fn -> File.rm(out) end)
+
+    assert {:ok, _stats} = Exmpeg.extract_audio(wav, out)
+    assert {:ok, %MediaInfo{streams: [audio]}} = Exmpeg.probe(out)
+    assert audio.codec in ["mp3", "mp3float"]
+    assert %{sample_rate: 44_100, channels: 1} = audio.audio
+  end
+
+  test "extract_audio resamples a mono 44.1 kHz WAV to 48 kHz opus" do
+    wav = TestFixtures.ensure_audio_only_clip!()
+    out = Path.join(System.tmp_dir!(), "exmpeg_wav_opus_#{System.unique_integer([:positive])}.opus")
+    on_exit(fn -> File.rm(out) end)
+
+    assert {:ok, %{sample_rate: 48_000}} = Exmpeg.extract_audio(wav, out)
+  end
+
+  test "transcode re-encodes a mono 44.1 kHz WAV to aac in m4a" do
+    wav = TestFixtures.ensure_audio_only_clip!()
+    out = Path.join(System.tmp_dir!(), "exmpeg_wav_aac_#{System.unique_integer([:positive])}.m4a")
+    on_exit(fn -> File.rm(out) end)
+
+    assert {:ok, %{streams_reencoded: 1}} = Exmpeg.transcode(wav, out, audio_codec: "aac")
+  end
+
   test "concat rejects inputs with mismatched stream layouts", %{clip: clip} do
     video_only = TestFixtures.ensure_video_only_clip!()
     out = Path.join(System.tmp_dir!(), "exmpeg_concat_bad_#{System.unique_integer([:positive])}.mp4")

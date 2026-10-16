@@ -645,6 +645,7 @@ fn build_audio_pipeline(
     })?;
     let mut decoder = AVCodecContext::new(&decoder_codec);
     decoder.apply_codecpar(codecpar)?;
+    crate::audio::default_unspecified_layout(&mut decoder);
     // The decoder moves the timestamps of a frame it trims (Opus and AAC
     // priming) only when it knows the packet time_base.
     decoder.set_pkt_timebase(in_tb);

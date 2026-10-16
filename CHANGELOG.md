@@ -13,6 +13,16 @@
   `"h264"`, `"aac"`, `"vp9"`, `"opus"`, and `"pcm_s16le"`, stay the
   same.
 
+### Fixed
+
+- `extract_audio/3` and `transcode/3` re-encode a plain mono or stereo
+  WAV again. Before, every call that resampled or re-encoded such a file,
+  for example to `.mp3`, `.m4a`, or `.opus`, returned
+  `{:error, %Exmpeg.Error{reason: :io_error}}` with the message
+  ``AVERROR(-1668179713): `Input changed` ``. The WAV leaves its channel
+  layout unspecified, and the decoder now gets the default layout for its
+  channel count, as in the `ffmpeg` CLI.
+
 ## 0.6.0 - 2026-09-23
 
 ### Changed
