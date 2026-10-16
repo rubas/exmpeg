@@ -4,13 +4,13 @@
 //!
 //! Built entirely on rsmpeg's safe wrappers — no `unsafe` in this module.
 
-use rsmpeg::avcodec::AVCodec;
 use rsmpeg::avformat::AVFormatContextInput;
 use rsmpeg::avutil::{get_pix_fmt_name, get_sample_fmt_name};
 use rsmpeg::ffi;
 use rustler::NifMap;
 
 use crate::errors::NativeError;
+use crate::ffi_helpers;
 use crate::input::InputSource;
 
 /// Whole-file probe report: container-level format info plus a stream
@@ -47,8 +47,9 @@ pub(crate) struct ProbeFormat {
 pub(crate) struct ProbeStream {
     pub(crate) index: u32,
     pub(crate) kind: String,
-    /// Codec short name (`"h264"`, `"aac"`); `"unknown"` when ffmpeg has
-    /// no decoder registered for the codec id.
+    /// Codec name as ffprobe reports it (`"h264"`, `"mp3"`), not the name
+    /// of a decoder; `"unknown"` when FFmpeg has no descriptor for the
+    /// codec id.
     pub(crate) codec: String,
     pub(crate) codec_long_name: Option<String>,
     /// Stream-level bit rate in bps; `0` when unset.
@@ -192,17 +193,14 @@ fn collect_streams(input: &AVFormatContextInput) -> Vec<ProbeStream> {
 }
 
 fn resolve_codec(codec_id: ffi::AVCodecID) -> (String, Option<String>) {
-    AVCodec::find_decoder(codec_id).map_or_else(
+    ffi_helpers::codec_descriptor(codec_id).map_or_else(
         || ("unknown".to_owned(), None),
-        |codec| {
-            let name = codec.name().to_string_lossy().into_owned();
-            let long = codec
-                .long_name()
-                .to_str()
-                .ok()
+        |(name, long_name)| {
+            let long = long_name
+                .and_then(|s| s.to_str().ok())
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
-            (name, long)
+            (name.to_string_lossy().into_owned(), long)
         },
     )
 }
@@ -226,5 +224,32 @@ fn ticks_to_seconds(ticks: i64, denom: i64) -> Option<f64> {
         None
     } else {
         Some(ticks as f64 / denom as f64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_codec_reports_the_codec_name_not_a_decoder_name() {
+        assert_eq!(
+            resolve_codec(ffi::AV_CODEC_ID_MP3),
+            (
+                "mp3".to_owned(),
+                Some("MP3 (MPEG audio layer 3)".to_owned())
+            )
+        );
+        assert_eq!(resolve_codec(ffi::AV_CODEC_ID_AV1).0, "av1");
+        assert_eq!(resolve_codec(ffi::AV_CODEC_ID_H264).0, "h264");
+        assert_eq!(resolve_codec(ffi::AV_CODEC_ID_AAC).0, "aac");
+    }
+
+    #[test]
+    fn resolve_codec_reports_unknown_for_an_id_without_descriptor() {
+        assert_eq!(
+            resolve_codec(ffi::AV_CODEC_ID_NONE),
+            ("unknown".to_owned(), None)
+        );
     }
 }

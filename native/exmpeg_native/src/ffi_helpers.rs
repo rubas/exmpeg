@@ -42,6 +42,23 @@ pub(crate) fn codec_name(id: ffi::AVCodecID) -> &'static CStr {
     unsafe { CStr::from_ptr(ffi::avcodec_get_name(id)) }
 }
 
+/// The name and long name of `id` from the codec descriptor table, such
+/// as `("mp3", Some("MP3 (MPEG audio layer 3)"))`. Unlike a decoder name,
+/// they do not depend on the decoders that the FFmpeg build has. `None`
+/// when `id` has no descriptor.
+pub(crate) fn codec_descriptor(
+    id: ffi::AVCodecID,
+) -> Option<(&'static CStr, Option<&'static CStr>)> {
+    // SAFETY: `avcodec_descriptor_get` returns NULL or a pointer into a
+    // static table that lives for the whole program. A descriptor's `name`
+    // is never NULL, but its `long_name` may be.
+    unsafe {
+        let desc = ffi::avcodec_descriptor_get(id).as_ref()?;
+        let long_name = (!desc.long_name.is_null()).then(|| CStr::from_ptr(desc.long_name));
+        Some((CStr::from_ptr(desc.name), long_name))
+    }
+}
+
 /// The out-of-band codec extradata of `params`, empty when it has none.
 pub(crate) fn extradata(params: &AVCodecParameters) -> &[u8] {
     if params.extradata.is_null() || params.extradata_size <= 0 {
