@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+
+- Breaking: `Exmpeg.probe/1` now reports `codec` and `codec_long_name`
+  the way ffprobe reports `codec_name` and `codec_long_name`: the codec
+  name, such as `"mp3"` and `"av1"`, not the name of the first decoder,
+  such as `"mp3float"` and `"libdav1d"`. The value no longer depends on
+  the decoders in the FFmpeg build, so a source build and the precompiled
+  NIF report the same name. Names that were already codec names, such as
+  `"h264"`, `"aac"`, `"vp9"`, `"opus"`, and `"pcm_s16le"`, stay the
+  same.
+
 ### Fixed
 
 - `extract_audio/3` and `transcode/3` re-encode a plain mono or stereo
