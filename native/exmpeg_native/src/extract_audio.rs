@@ -78,6 +78,7 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
         let codecpar = input.streams()[audio_index].codecpar();
         decoder.apply_codecpar(&codecpar)?;
     }
+    crate::audio::default_unspecified_layout(&mut decoder);
     decoder.set_time_base(stream_time_base);
     decoder.open(None)?;
 
@@ -109,18 +110,13 @@ pub(crate) fn extract_audio<Q: AsRef<Path>>(
     // The layout must match for this to be safe: a 2-channel source with
     // a *specific* non-stereo mask (e.g. WAVEFORMATEXTENSIBLE FL+LFE)
     // sent unremapped under the canonical target layout the output
-    // stream advertises would mislabel/misorder its channels. An
-    // *unspecified* source order with the matching channel count has no
-    // order to preserve, so passthrough under the canonical target is
-    // fine (and avoids the resampler for the common WAV case, which
-    // reports its layout as unspecified).
-    let layout_ok = ffi_helpers::channel_layouts_equal(&decoder.ch_layout, &target_layout)
-        || (decoder.ch_layout.order == ffi::AV_CHANNEL_ORDER_UNSPEC
-            && decoder.ch_layout.nb_channels == target_channels);
+    // stream advertises would mislabel/misorder its channels. A plain
+    // WAV with an unspecified order already has the default layout from
+    // `default_unspecified_layout`, so it matches here.
     let passthrough = encoder.frame_size == 0
         && decoder.sample_fmt == target_fmt
         && decoder.sample_rate == target_rate
-        && layout_ok;
+        && ffi_helpers::channel_layouts_equal(&decoder.ch_layout, &target_layout);
 
     let mut swr = if passthrough {
         None
