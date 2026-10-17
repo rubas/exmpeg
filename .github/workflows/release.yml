@@ -402,12 +402,15 @@ jobs:
 
           tar -czf "${LIB_NAME}.tar.gz" -C "${STAGE}" .
 
+      # The release keeps its own copy, so the artifact only has to outlive
+      # the release job.
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nif-${{ matrix.id }}
           path: "*exmpeg_native-*.tar.gz"
           if-no-files-found: error
+          retention-days: 1
 
   tag:
     name: Push release tag
