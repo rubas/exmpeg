@@ -23,6 +23,14 @@
   layout unspecified, and the decoder now gets the default layout for its
   channel count, as in the `ffmpeg` CLI.
 
+### Security
+
+- The precompiled NIFs bundle FFmpeg 9.0.2 (was 9.0.1). It fixes three
+  heap writes that a crafted file reaches in the APAC, Cook, and VVC
+  decoders: CVE-2026-125267, CVE-2026-125203, and CVE-2026-125244. Source
+  builds (`EXMPEG_BUILD=1`) get the fixes from the FFmpeg 9.0.2 of the
+  host.
+
 ## 0.6.0 - 2026-09-23
 
 ### Changed

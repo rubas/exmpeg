@@ -71,7 +71,7 @@ info.format.duration_s
 
 ## Runtime requirements
 
-Each precompiled tarball bundles the seven FFmpeg 9.0.1 shared libraries
+Each precompiled tarball bundles the seven FFmpeg 9.0.2 shared libraries
 (`libavformat`, `libavcodec`, `libavutil`, `libavfilter`, `libswscale`,
 `libswresample`, `libavdevice`) next to the NIF. The NIF finds them through
 `$ORIGIN` or `@loader_path`, so you need no `LD_LIBRARY_PATH`.

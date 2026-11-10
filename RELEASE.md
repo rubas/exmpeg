@@ -30,7 +30,7 @@ for every `<target>` listed in `lib/exmpeg/native.ex`'s
 
 Each tarball contains the NIF and the seven FFmpeg shared libraries that
 `rusty_ffmpeg` links, built from the FFmpeg release that `FFMPEG_VERSION`
-in `.github/workflows/release.yml` names (9.0.1):
+in `.github/workflows/release.yml` names (9.0.2):
 
 ```
 libexmpeg_native-vX.Y.Z-nif-2.17-<target>.so   # NIF
