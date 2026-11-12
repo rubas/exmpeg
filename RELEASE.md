@@ -158,7 +158,8 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
    Merge nothing else to `lib/`, `native/`, or `mix.exs` between the
    version bump and the checksum PR, or the publish job stops. The tag
    `vX.Y.Z` points at the version bump, so its checksum file is still
-   the one of the release before. A git dependency on the tag needs `EXMPEG_BUILD=1`.
+   the one of the release before. A git dependency on the tag needs
+   `EXMPEG_BUILD=1`.
 
 ## Manual / out-of-band release
 
