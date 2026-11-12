@@ -7,9 +7,9 @@ release has three parts:
    target. Built by `.github/workflows/release.yml`.
 2. **Checksum file** (`checksum-Elixir.Exmpeg.Native.exs`) committed to
    the repo. Built **locally** by `task checksum:download`.
-3. **Hex package** uploaded with `task release:publish`. The checksum
-   file is included in the Hex tarball and is what consumers' builds
-   verify against.
+3. **Hex package** published by `.github/workflows/release.yml` when
+   the checksum PR merges. The checksum file is included in the Hex
+   tarball and is what consumers' builds verify against.
 
 ## Targets
 
@@ -104,26 +104,62 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
 
    This is a thin wrapper around `mix rustler_precompiled.download
    Exmpeg.Native --all --print`, which downloads every tarball
-   referenced by the `base_url` in `lib/exmpeg/native.ex`, verifies
-   them against `SHA256SUMS`, and rewrites
-   `checksum-Elixir.Exmpeg.Native.exs` in place.
+   referenced by the `base_url` in `lib/exmpeg/native.ex`, hashes
+   them, and rewrites `checksum-Elixir.Exmpeg.Native.exs` in place.
+   It does not read `SHA256SUMS`; the publish job compares the two.
 
-   Commit the regenerated `checksum-Elixir.Exmpeg.Native.exs`. The
-   diff should contain only the checksum entries for the new version.
+   Commit the regenerated `checksum-Elixir.Exmpeg.Native.exs`, and
+   open a pull request. The diff should contain only the checksum
+   entries for the new version.
 
-4. **Publish to Hex**
+4. **Merge the checksum PR**
 
-   ```bash
-   task release:publish
-   ```
+   The merge publishes. A push to `main` that changes the checksum
+   file, for a version that has its tag, starts the `Publish to Hex`
+   job of `.github/workflows/release.yml`. The job publishes the tree
+   of that merge:
 
-   This runs `mix deps.get`, `mix hex.build` (a final sanity check
-   that the package compiles cleanly), then `mix hex.publish`. The
-   command will prompt for confirmation and your Hex API key.
+   1. It stops when `lib/`, `native/`, or `mix.exs` differ from the
+      tag, because the tarballs hold the NIF built from the tag.
+   2. It compares the checksum file with the `SHA256SUMS` of the
+      GitHub release, and stops when they differ.
+   3. It installs the codec libraries from README.md, downloads the
+      precompiled NIF of its runner, checks it against the checksum
+      file, and loads it.
+   4. It runs `mix hex.publish --yes`, which uploads the package and
+      its docs, and fails when the log says `Publishing failed` or
+      `Publishing docs failed`.
+
+   The job stores no Hex key. It runs in the GitHub environment `hex`,
+   which only `main` can use, and Hex exchanges the job's OIDC token
+   for a token that can only publish `exmpeg`. For that, the package
+   has a workload identity on hex.pm, in its tab "Workload
+   identities": repository owner `rubas`, repository `exmpeg`,
+   workflow `release.yml`, environment `hex`. Only a full owner of
+   the package can add or change it.
+
+   The package has staged publishing on. Hex holds each release from
+   the job, and the job ends with `Package staged for approval at
+   <url>`. A package owner approves it on hex.pm with their 2FA,
+   within 7 days. The job does not wait for that approval: a GitHub
+   job stops after 6 hours.
+
+   When the job fails for a cause outside the repo, such as the
+   workload identity, fix it and re-run the job: it publishes the same
+   commit. When the cause is in the repo, fix it and release a new
+   patch version, because only the push of a checksum PR publishes.
+   When GitHub cancelled the run of that push, because newer pushes
+   queued behind it, re-run the cancelled run.
 
    The `files:` list in `mix.exs` includes the checksum file, so the
    published Hex package contains the verified hashes for every
    precompiled target.
+
+   Merge nothing else to `lib/`, `native/`, or `mix.exs` between the
+   version bump and the checksum PR, or the publish job stops. The tag
+   `vX.Y.Z` points at the version bump, so its checksum file is still
+   the one of the release before. A git dependency on the tag needs
+   `EXMPEG_BUILD=1`.
 
 ## Manual / out-of-band release
 
@@ -138,12 +174,9 @@ The run builds the commit the tag points at, with the workflow file of
 the branch it started from. It fails before any build when the tag does
 not exist or when the tagged `mix.exs` has a different `@version`. It
 replaces the existing release artefacts. Then follow steps 3 and 4
-above from a branch at the rebuilt tag, not from `main`, because both
-steps read the version from the checkout:
-
-```bash
-git switch -c release/v0.1.1 v0.1.1
-```
+above while `lib/`, `native/`, and `mix.exs` on `main` still equal
+the tag. Otherwise the publish job stops, and you release a new patch
+version instead.
 
 A rebuild never reproduces the old tarballs byte for byte, so their
 checksums change. Rebuild only a version that is not on Hex yet, for
@@ -168,4 +201,7 @@ verify the tarballs against the checksum file in its Hex package.
 - **`mix hex.publish` rejects the package** — most often a `files:`
   miss in `mix.exs` or a `:rustler_precompiled` version mismatch. The
   hex CLI prints the exact missing file; add it to the `files:` list
-  and rerun.
+  and re-run the job.
+- **The publish job fails with `access_denied`** - the workload
+  identity on hex.pm does not match the repository, the workflow file,
+  or the environment `hex`.
