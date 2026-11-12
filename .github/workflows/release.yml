@@ -405,12 +405,23 @@ jobs:
               done
             done
             [ "$unbundled" = 0 ] || exit 1
+            # The BEAM binds every symbol of the NIF when it loads it, and
+            # only the enif_* functions come from the BEAM. macOS leaves a
+            # symbol that no library defines to that load.
+            REPORT="$(nm -m -u "${STAGE}/${LIB_NAME}")"
+            if grep 'dynamically looked up' <<< "$REPORT" | grep -v ' _enif_' >&2; then
+              echo "::error::The NIF does not load: it needs the symbols above" >&2
+              exit 1
+            fi
           else
             # Linux: the NIF's RPATH is $ORIGIN. Without LD_LIBRARY_PATH,
             # ldd must resolve every bundled FFmpeg library inside the
-            # archive.
+            # archive. With -r, it also binds every symbol, as the BEAM does
+            # when it loads the NIF. Only the BEAM defines enif_*.
             patchelf --set-rpath '$ORIGIN' "${STAGE}/${LIB_NAME}"
-            if env -u LD_LIBRARY_PATH ldd "${STAGE}/${LIB_NAME}" | grep 'not found' >&2; then
+            REPORT="$(env -u LD_LIBRARY_PATH ldd -r "${STAGE}/${LIB_NAME}" 2>&1)" || { echo "$REPORT" >&2; exit 1; }
+            if grep -E 'not found|undefined symbol' <<< "$REPORT" | grep -v 'undefined symbol: enif_' >&2; then
+              echo "::error::The NIF does not load: it needs the libraries or symbols above" >&2
               exit 1
             fi
           fi
@@ -501,19 +512,16 @@ jobs:
       contents: read # check out the repository
       id-token: write # mix hex.publish exchanges the job's OIDC token for a Hex token
     steps:
+      # The package holds the sources of the tag, which the tarballs were
+      # built from, and the checksum file of the merge that publishes.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.detect.outputs.sha }}
+          ref: refs/tags/${{ needs.detect.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
 
-      # The tarballs hold the NIF built from the tag. A change to the Elixir
-      # or Rust sources after the tag would ship stubs and wrappers that the
-      # NIF was not built for.
-      - name: Compare the package sources with the tag
-        env:
-          TAG: ${{ needs.detect.outputs.tag }}
-        run: git diff --exit-code --stat "$TAG" HEAD -- lib native mix.exs
+      - name: Take the checksum file of the merge
+        run: git checkout "$GITHUB_SHA" -- checksum-Elixir.Exmpeg.Native.exs
 
       # Hex versions are immutable, so a package with the checksums of other
       # tarballs stays broken.
@@ -541,10 +549,7 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - name: Install dependencies
-        run: |
-          mix local.hex --force
-          mix local.rebar --force
-          mix deps.get
+        run: mix deps.get
 
       # The compile downloads the precompiled NIF of this runner and checks
       # it against the checksum file, as a consumer's build does.
