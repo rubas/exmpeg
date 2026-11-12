@@ -12,8 +12,9 @@ with strangers.
   path. It needs `ffmpeg` and `ffprobe` on `PATH`; each test skips itself
   when one is missing. CI runs it on every pull request and every push to
   `main`.
-- The Taskfile sets `EXMPEG_BUILD=1`, so a local build never downloads a
-  precompiled NIF.
+- The Taskfile and CI set `EXMPEG_BUILD=1`, so their builds compile the
+  NIF from source. A bare `mix compile` downloads the precompiled NIF of
+  the GitHub release and ignores your Rust changes.
 - The toolchain comes from the host: the Elixir, OTP, and Rust versions in
   `.github/workflows/ci.yml`, plus FFmpeg 9 with its headers, `pkg-config`,
   and libclang. On Arch that is `pacman -S ffmpeg clang`. A distro with an
@@ -46,6 +47,11 @@ with strangers.
   private to the library. Stub names match the Rust NIF symbols exactly.
 - Never shell out from `lib/`. Only `test/support/fixtures.ex` and the
   integration assertions use the `ffmpeg` and `ffprobe` CLIs.
+- A merge to `main` that bumps `@version` in `mix.exs` tags the version
+  and builds the release tarballs. A merge that changes
+  `checksum-Elixir.Exmpeg.Native.exs` publishes the version to Hex, and
+  Hex versions are immutable. Change each only in its release PR;
+  `RELEASE.md` has the flow.
 - `rsmpeg` comes from our fork `rubas/rsmpeg` at a pinned `rev`. The
   `TODO(revert: ...)` in `native/exmpeg_native/Cargo.toml` names when to go
   back to crates.io. `task upgrade` skips git dependencies, so move the
