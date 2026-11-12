@@ -14,7 +14,8 @@ defmodule Exmpeg.Native do
     crate: "exmpeg_native",
     base_url: "https://github.com/rubas/exmpeg/releases/download/v#{@version}",
     version: @version,
-    # Opt-in source build; unconditional in this repo via `config/config.exs`.
+    # Opt-in source build. In this repo, `config/config.exs` mirrors
+    # EXMPEG_BUILD into the compile env, which Mix tracks.
     force_build:
       System.get_env("EXMPEG_BUILD") in ["1", "true"] or
         Application.compile_env(:rustler_precompiled, [:force_build, :exmpeg], false),

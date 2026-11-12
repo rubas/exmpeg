@@ -1,7 +1,7 @@
 import Config
 
-# When developing this library locally, always build the NIF from source
-# rather than trying to download a precompiled artefact from GitHub releases.
-# Consumers of the published Hex package get the precompiled artefact
-# matching their target triple instead.
-config :rustler_precompiled, :force_build, exmpeg: true
+# Mirror EXMPEG_BUILD into the config: Mix recompiles Exmpeg.Native when a
+# `compile_env` value changes, but not when an env var read at compile time
+# changes. So a bare `mix compile`, which downloads the released NIF, never
+# leaves a stale NIF behind for the next source build.
+config :rustler_precompiled, :force_build, exmpeg: System.get_env("EXMPEG_BUILD") in ["1", "true"]
