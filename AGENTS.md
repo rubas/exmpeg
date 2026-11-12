@@ -14,7 +14,8 @@ with strangers.
   `main`.
 - The Taskfile and CI set `EXMPEG_BUILD=1`, so their builds compile the
   NIF from source. A bare `mix compile` downloads the precompiled NIF of
-  the GitHub release and ignores your Rust changes.
+  the GitHub release and ignores your Rust changes. After a switch between
+  the two, Mix stops with a `compile_env` error; run `mix compile --force`.
 - The toolchain comes from the host: the Elixir, OTP, and Rust versions in
   `.github/workflows/ci.yml`, plus FFmpeg 9 with its headers, `pkg-config`,
   and libclang. On Arch that is `pacman -S ffmpeg clang`. A distro with an
