@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 - 2026-11-12
 
 ### Changed
 
@@ -22,6 +22,8 @@
   ``AVERROR(-1668179713): `Input changed` ``. The WAV leaves its channel
   layout unspecified, and the decoder now gets the default layout for its
   channel count, as in the `ffmpeg` CLI.
+- The README lists `libwebpmux3` among the runtime libraries of the
+  precompiled NIFs. A host without it cannot load the NIF.
 
 ### Security
 

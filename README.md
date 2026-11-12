@@ -10,7 +10,7 @@ call returns plain Elixir structs and maps.
 ```elixir
 def deps do
   [
-    {:exmpeg, "~> 0.6"}
+    {:exmpeg, "~> 0.7"}
   ]
 end
 ```
