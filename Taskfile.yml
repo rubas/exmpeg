@@ -96,6 +96,10 @@ tasks:
       this after the release workflow has published the tarballs. The merge
       of the checksum PR publishes the package to Hex.
     cmds:
+      # The download takes the version and the targets from the metadata that
+      # the last compile of Exmpeg.Native wrote to the user cache, maybe in
+      # another checkout. --force writes it anew.
+      - mix compile --force
       - mix rustler_precompiled.download Exmpeg.Native --all --print
 
   check:
