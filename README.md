@@ -90,12 +90,13 @@ The host must supply the rest:
   (Ubuntu 24.04, Debian 13). An older host must build from source. Check
   with `ldd --version`.
 - The codec libraries that libavcodec loads: `libmp3lame`, `libopus`,
-  `libvpx` (9 or newer), and `libwebp` (7 or newer, for `.webp` frames).
-  The distro packages pull in their own dependencies.
+  `libvpx` 9 or newer, and `libwebp` 7 with `libwebpmux` 3 for `.webp`
+  frames. Only Ubuntu 24.04 and Debian 13 or newer ship `libvpx` 9, so an
+  older distro must build from source.
 
 ```bash
 # Debian / Ubuntu
-sudo apt install -y libmp3lame0 libopus0 libvpx9 libwebp7
+sudo apt install -y libmp3lame0 libopus0 libvpx9 libwebp7 libwebpmux3
 
 # macOS (Homebrew)
 brew install lame opus libvpx webp
