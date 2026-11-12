@@ -106,8 +106,9 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
    ```
 
    It compiles `Exmpeg.Native` again first, because the download reads
-   the version and the targets from the metadata of the last compile, in
-   a user cache that every checkout shares. Then it runs `mix
+   the version and the targets from the metadata of the last compile. It
+   keeps that metadata in `_build`, where a compile in another checkout
+   cannot change it. Then it runs `mix
    rustler_precompiled.download Exmpeg.Native --all --print`, which
    downloads every tarball
    referenced by the `base_url` in `lib/exmpeg/native.ex`, hashes
@@ -155,8 +156,6 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
    the workflow file of its run, so after a fix of the job itself,
    release a new patch version, or a package owner runs `mix
    hex.publish` from the tag with the checksum file of the merge.
-   When GitHub cancelled the run of that push, because newer pushes
-   queued behind it, re-run the cancelled run.
 
    The `files:` list in `mix.exs` includes the checksum file, so the
    published Hex package contains the verified hashes for every

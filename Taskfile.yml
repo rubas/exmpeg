@@ -95,12 +95,12 @@ tasks:
       its GitHub release and write `checksum-Elixir.Exmpeg.Native.exs`. Run
       this after the release workflow has published the tarballs. The merge
       of the checksum PR publishes the package to Hex.
+    # The download reads the version and the targets from the metadata of the last compile. A cache
+    # in this checkout keeps a compile in another checkout from changing it, and --force writes it.
+    env:
+      RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH: "{{.ROOT_DIR}}/_build/rustler_precompiled"
     cmds:
-      # The download takes the version and the targets from the metadata that
-      # the last compile of Exmpeg.Native wrote to the user cache, maybe in
-      # another checkout. --force writes it anew.
-      - mix compile --force
-      - mix rustler_precompiled.download Exmpeg.Native --all --print
+      - mix do compile --force + rustler_precompiled.download Exmpeg.Native --all --print
 
   check:
     desc: Full local quality gate (Elixir + Rust)
