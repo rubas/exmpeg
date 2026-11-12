@@ -56,7 +56,10 @@ a bundled FFmpeg library that is missing from the tarball fails with
 `=> not found`. This check does not catch a library that the runner has
 and the consumer does not. On macOS, every install name must be a
 member of the tarball, a system path (`/usr/lib`, `/System/Library`), or
-a Homebrew codec formula (`lame`, `opus`, `libvpx`, `webp`).
+a Homebrew codec formula (`lame`, `opus`, `libvpx`, `webp`). On both, the
+job also binds every symbol of the NIF, as the BEAM does when it loads
+it, and fails on a symbol that no library defines. Only the BEAM defines
+`enif_*`.
 
 The bundled FFmpeg is built LGPL-only (no `--enable-gpl` /
 `--enable-libx264`) so the tarballs ship under the package's MIT
@@ -102,8 +105,12 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
    task checksum:download
    ```
 
-   This is a thin wrapper around `mix rustler_precompiled.download
-   Exmpeg.Native --all --print`, which downloads every tarball
+   It compiles `Exmpeg.Native` again first, because the download reads
+   the version and the targets from the metadata of the last compile. It
+   keeps that metadata in `_build`, where a compile in another checkout
+   cannot change it. Then it runs `mix
+   rustler_precompiled.download Exmpeg.Native --all --print`, which
+   downloads every tarball
    referenced by the `base_url` in `lib/exmpeg/native.ex`, hashes
    them, and rewrites `checksum-Elixir.Exmpeg.Native.exs` in place.
    It does not read `SHA256SUMS`; the publish job compares the two.
@@ -116,17 +123,16 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
 
    The merge publishes. A push to `main` that changes the checksum
    file, for a version that has its tag, starts the `Publish to Hex`
-   job of `.github/workflows/release.yml`. The job publishes the tree
-   of that merge:
+   job of `.github/workflows/release.yml`. The job publishes the
+   sources of the tag `vX.Y.Z`, which the tarballs were built from, with
+   the checksum file of the merge:
 
-   1. It stops when `lib/`, `native/`, or `mix.exs` differ from the
-      tag, because the tarballs hold the NIF built from the tag.
-   2. It compares the checksum file with the `SHA256SUMS` of the
+   1. It compares the checksum file with the `SHA256SUMS` of the
       GitHub release, and stops when they differ.
-   3. It installs the codec libraries from README.md, downloads the
+   2. It installs the codec libraries from README.md, downloads the
       precompiled NIF of its runner, checks it against the checksum
       file, and loads it.
-   4. It runs `mix hex.publish --yes`, which uploads the package and
+   3. It runs `mix hex.publish --yes`, which uploads the package and
       its docs, and fails when the log says `Publishing failed` or
       `Publishing docs failed`.
 
@@ -146,17 +152,17 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
 
    When the job fails for a cause outside the repo, such as the
    workload identity, fix it and re-run the job: it publishes the same
-   commit. When the cause is in the repo, fix it and release a new
-   patch version, because only the push of a checksum PR publishes.
-   When GitHub cancelled the run of that push, because newer pushes
-   queued behind it, re-run the cancelled run.
+   tag. A cause in the tag needs a new patch version. A re-run keeps
+   the workflow file of its run, so after a fix of the job itself,
+   release a new patch version, or a package owner runs `mix
+   hex.publish` from the tag with the checksum file of the merge.
 
    The `files:` list in `mix.exs` includes the checksum file, so the
    published Hex package contains the verified hashes for every
    precompiled target.
 
-   Merge nothing else to `lib/`, `native/`, or `mix.exs` between the
-   version bump and the checksum PR, or the publish job stops. The tag
+   A change that merges between the version bump and the checksum PR
+   ships only with the next version. The tag
    `vX.Y.Z` points at the version bump, so its checksum file is still
    the one of the release before. A git dependency on the tag needs
    `EXMPEG_BUILD=1`.
@@ -174,9 +180,7 @@ The run builds the commit the tag points at, with the workflow file of
 the branch it started from. It fails before any build when the tag does
 not exist or when the tagged `mix.exs` has a different `@version`. It
 replaces the existing release artefacts. Then follow steps 3 and 4
-above while `lib/`, `native/`, and `mix.exs` on `main` still equal
-the tag. Otherwise the publish job stops, and you release a new patch
-version instead.
+above.
 
 A rebuild never reproduces the old tarballs byte for byte, so their
 checksums change. Rebuild only a version that is not on Hex yet, for
@@ -200,8 +204,8 @@ verify the tarballs against the checksum file in its Hex package.
   matrix. If a matrix job failed, no tarball exists for that target.
 - **`mix hex.publish` rejects the package** — most often a `files:`
   miss in `mix.exs` or a `:rustler_precompiled` version mismatch. The
-  hex CLI prints the exact missing file; add it to the `files:` list
-  and re-run the job.
+  hex CLI prints the exact missing file. Add it to the `files:` list,
+  and release a new patch version.
 - **The publish job fails with `access_denied`** - the workload
   identity on hex.pm does not match the repository, the workflow file,
   or the environment `hex`.
