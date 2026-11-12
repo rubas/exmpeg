@@ -19,6 +19,9 @@ permissions: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
+  # Keep every pending run. A newer push would otherwise cancel the pending
+  # run of a checksum merge, and only that run publishes.
+  queue: max
 
 env:
   CARGO_TERM_COLOR: always
