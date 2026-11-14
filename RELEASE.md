@@ -180,7 +180,9 @@ The run builds the commit the tag points at, with the workflow file of
 the branch it started from. It fails before any build when the tag does
 not exist or when the tagged `mix.exs` has a different `@version`. It
 replaces the existing release artefacts. Then follow steps 3 and 4
-above.
+above while `@version` in `mix.exs` on `main` still names the tag,
+because both steps take the version from `main`. Otherwise release a
+new patch version instead.
 
 A rebuild never reproduces the old tarballs byte for byte, so their
 checksums change. Rebuild only a version that is not on Hex yet, for
