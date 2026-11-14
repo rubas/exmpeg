@@ -152,10 +152,13 @@ Add a new target by extending both `lib/exmpeg/native.ex` and the
 
    When the job fails for a cause outside the repo, such as the
    workload identity, fix it and re-run the job: it publishes the same
-   tag. A cause in the tag needs a new patch version. A re-run keeps
-   the workflow file of its run, so after a fix of the job itself,
-   release a new patch version, or a package owner runs `mix
-   hex.publish` from the tag with the checksum file of the merge.
+   tag. When hex.pm already lists the version, for example after an
+   owner approved a release whose docs upload failed, the job uploads
+   only the docs, which wait for approval too. A cause in the tag needs
+   a new patch version. A re-run keeps the workflow file of its run,
+   so after a fix of the job itself, release a new patch version,
+   or a package owner runs `mix hex.publish` from the tag with the
+   checksum file of the merge.
 
    The `files:` list in `mix.exs` includes the checksum file, so the
    published Hex package contains the verified hashes for every
